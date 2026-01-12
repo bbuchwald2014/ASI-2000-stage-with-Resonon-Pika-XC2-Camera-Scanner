@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from typing import Any, Literal, Required, TypedDict, Unpack, overload, cast
-from scan_metadata_headers import Const, StrNum, SchemaName
+from SCAN_METADATA_HEADERS import Const, StrNum, SchemaName
 
 
 # ---------- Mixins ----------
@@ -19,6 +19,13 @@ class HasSpeed(TypedDict, total=False):
 class HasExposure(TypedDict, total=False):
     exposure_time: StrNum
     gain: StrNum
+
+class HasLED(TypedDict, total = False):
+    default_led_power: int
+
+class HasNoLED(TypedDict, total = False):
+    default_led_power: int #mutually exclusive type from <HasLED> right now to avoid confusion,
+                           #but can potentially run both when measuring intensity of light >700 nm; has been done
 
 class HasGrid(TypedDict, total=False):
     rows: str | int
@@ -44,10 +51,10 @@ class WellParams(HasSchema, HasGrid):
 class PlateParams(HasSchema, HasGrid):
     schema: Literal["plate_sample"]
 
-class BrightfieldParams(HasSchema, HasXY, HasSpeed, HasExposure):
+class BrightfieldParams(HasSchema, HasXY, HasSpeed, HasExposure, HasSuperGrid, HasLED):
     schema: Literal["bright"]
 
-class FluoroParams(HasSchema, HasXY, HasSpeed, HasExposure, HasGrid, HasSuperGrid):
+class FluoroParams(HasSchema, HasXY, HasSpeed, HasExposure, HasGrid, HasSuperGrid, HasNoLED): #
     schema: Literal["fluoro"]
 
 # Keep total=True; we’ll return a fully-populated dict for debug
@@ -76,6 +83,7 @@ _DEFAULTS: dict[str, dict[str, StrNum]] = {
         Const.KEY_GAIN:        Const.VAL_BRIGHT_GAIN,
         Const.KEY_ROWS:        Const.VAL_PLATE_ROWS,
         Const.KEY_COLS:        Const.VAL_PLATE_COLS,
+        Const.KEY_DEF_LED_POW: Const.VAL_BRIGHT_LED_POWER,
     },   
     "fluoro": {
         Const.KEY_X_DISTANCE:      Const.VAL_FLUORO_X_DISTANCE,
@@ -85,9 +93,13 @@ _DEFAULTS: dict[str, dict[str, StrNum]] = {
         Const.KEY_GAIN:        Const.VAL_FLUORO_GAIN,
         Const.KEY_ROWS:        Const.VAL_WELLS_ROWS,
         Const.KEY_COLS:        Const.VAL_WELLS_COLS,
+        Const.KEY_DEF_LED_POW: Const.VAL_FLUORO_LED_POWER,
+        
         # Accept grid / super-grid overrides for fluoro:
         #Const.KEY_ROWS:  5,
         #Const.KEY_COLS:  5,
+    },
+    "supergrid":{    
         "super_rows":             1,
         "off_set_super_rows":     0,
         "delta_super_rows":       0,

@@ -26,11 +26,12 @@ import numpy as np
 import regex as re
 import keyboard # pip install keyboard
 from typing import Tuple, List, Iterable
+from typing import Callable, TypeVar, Any, Optional, Dict, Union
 from itertools import product  # --- Build permutation tree of (debug_type, strategy_type) ---
 import gc
 import types
 from decimal import Decimal, InvalidOperation
-from typing import Callable, TypeVar, Any, Optional, Dict, Union
+
 import math
 import json
 import psutil, os
@@ -52,15 +53,17 @@ import cv2
 # Try Sobel + Variance Combination
 # -----------GUI EXTRAS-------------- #
 # main.py
-sys.path.
-for i, pathobj in enumerate(sys.path):
-     print(f'Path index {i}:{pathobj} -- {pathobj}\n\t from memory-- {pathobj.__dir__}n\t\t and file -- {os.path.abspath(str(pathobj))} using future annoations:{pathobj.find} {pathobj.__annotations__}')
+
+verbose = lambda *args: False
+if verbose:
+    for i, pathobj in enumerate(sys.path):print(f"Path index {i}:{pathobj} -- {pathobj}\n"
+                                                f"\t from memory-- {pathobj.__dir__}\n" f"\t\t and file -- {os.path.abspath(str(pathobj))}")
+del verbose
     
 sys.path.append(r"E:\Users\Ben\Programs\HSI Programs\z")
 from AUX_IMPORTS import ensure_packages, import_pysimplegui, safe_import
 import CAMERA_LIVE_CONTROL2 as focus
 from typing import TypedDict
-time.sleep(5)
 import SCAN_METADATA_DICTIONARY as SMF #Custom class-module to hold metadata for GUI and .JSON files efficiently
 import SCAN_METADATA_HEADERS as SMH 
 # ------------------------- #
@@ -98,7 +101,7 @@ import warnings
 ##HSI SCANNER INIT##
 ENABLE_LIVE_KEYBOARD = True
 ENABLE_MINIMUM_CAMERA_SETTINGS = True
-USER_CONTINOUS_SECONDARY_CAMERA_SNAPSHOT = True
+USER_CONTINOUS_SECONDARY_CAMERA_SNAPSHOT = False
 USE_SECONDARY_CAMERA = True
 ##MAKE_GUI CLASS##
 DEFAULT_FOLDER = Path(r"E:\Users\Ben\Programs\HSI Programs\z\Data") #string arg not os.path arg --> changed to Path obj not for flexibility
@@ -461,7 +464,7 @@ class MS2000(SerialPort):
             List[Tuple[int, int, int]]: The remaining list of points after popping the first.
                 This list can be empty (`[]`) if all points have been used.
         """
-        assert (home_points is not None and len(home_points) > 0 and type(home_points) is Tuple) 
+        assert (home_points is not None and len(home_points) > 0 and type(home_points is Tuple[int, int, int])) # was causing crash --> <and type(home_points) is Tuple) >
         
         point = home_points.pop(0)  # Remove and retrieve the first (x, y, z) tuple
         custom_x, custom_y, custom_z = point
@@ -472,16 +475,26 @@ class MS2000(SerialPort):
         return home_points
 
 
+
     def get_position(self, axis: str) -> Optional[Union[int, float]]:
         """
         Query the stage for its position along a given axis.
-        Returns an integer or float position, or None if the read fails.
         """
 
-        def _read_position(axis: str) -> Optional[Union[int, float]]:
+        def _read_position(axis: str, _attempt_num: int = 1) -> Optional[Union[int, float]]:
             # --- First attempt: normal WHERE ---
             resp = self.send_command_normal(f"WHERE {axis}", return_encoded=True)
             resp = self.read_response()
+
+            if (resp is None) and (_attempt_num <= 3):
+                _attempt_num += 1
+                print(f"[Fallback] Raw response: {resp!r}, type={type(resp)}")
+                time.sleep(2)
+                print(
+                    f"Attempt num: {_attempt_num},\tCalling _read_position func to reread current stage position"
+                )
+                print(f"On ~line num: {DebugTimer.get_line_number()}")
+                return _read_position(axis=axis, _attempt_num= _attempt_num)
 
             print(f"[Fast] Raw response: {resp!r}, type={type(resp)}")
 
@@ -493,8 +506,6 @@ class MS2000(SerialPort):
             print("[Fast] Failed. Trying fallback 'W' command...")
             resp = self.send_command_normal(f"W {axis}", return_encoded=True)
 
-            print(f"[Fallback] Raw response: {resp!r}, type={type(resp)}")
-
             return _parse_position(resp)
 
         def _parse_position(value_str: Optional[str]) -> Optional[Union[int, float]]:
@@ -504,7 +515,9 @@ class MS2000(SerialPort):
 
             if isinstance(value_str, str) and len(value_str) > 1:
                 parts = value_str.split()
-            else: parts = value_str 
+            else:
+                return None
+
             print(f"Parsed parts: {parts}")
 
             if len(parts) < 2:
@@ -512,17 +525,19 @@ class MS2000(SerialPort):
 
             raw = parts[1]
 
-            # Try int
+            # Try float first
             try:
-                return float(raw)
-            except ValueError:
-                pass
-
-            # Try float
-            try:
-                return int(raw)
-            except ValueError:
-                return None
+                raw = float(raw)
+                try:
+                    raw *= -1.0
+                    return raw
+                except:
+                    pass
+                return raw
+            except ValueError as e:
+                raise ValueError(
+                    f"{e} can't cast raw response in _parse_position"
+                ) from e
 
         try:
             return _read_position(axis)
@@ -533,6 +548,7 @@ class MS2000(SerialPort):
             except Exception as e2:
                 print(f"Retry also failed: {e2}")
                 return None
+
 
 
     def get_position_trycasters(self, axis: str, types_to_check: Iterable[type] = (int, float, str)) -> Optional[object]:
@@ -604,24 +620,24 @@ class MS2000(SerialPort):
             while self.is_axis_busy(axis):
                 time.sleep(0.005)
     
-    def turn_on_light(self):
-        self.change_light_power(percentage_power= 99)  # POWER IS A [0, 99] NOT 100 :^)
+    def _turn_on_light(self, actual_percentage_power: int):
+        self._change_light_power(actual_percentage_power)  # POWER IS A [0, 99] NOT 100 :^)
         #self.change_light_power(percentage_power=  99)  # POWER IS A [0, 99] NOT 100 :^)
         print("Light turned ON")
     
-    def turn_off_light(self):
-        self.change_light_power(percentage_power =  0)  # Change to real command
+    def _turn_off_light(self):
+        self._change_light_power(actual_percentage_power =  0)  # Change to real command
         print("Light turned OFF")
     
-    def change_light_power(self, percentage_power: int):
+    def _change_light_power(self, actual_percentage_power: int):
         '''  
         **NOT CASE SENSITIVE**
         command: LED (LED DIMMER Firmware Required)
         Format: LED [X= 0 to 99]
         LED X?'''
         
-        self.send_command_normal(f"LED X = {percentage_power}")
-        print(f"Changed LED power to --> {percentage_power}%")
+        self.send_command_normal(f"LED X = {actual_percentage_power}")
+        print(f"Changed LED power to --> {actual_percentage_power}%")
        
     @staticmethod
     def get_and_set_backlash(
@@ -961,13 +977,22 @@ class HSI_Scanner:
         exposure = self.exp_min
         
         return exposure, gain
+
     
-    def turn_on_light(self):
-        #pass
-        self.Stage.turn_on_light()
+    def turn_on_light(self, percentage_power: int):
+        '''Default is for brightfield as of right now; potentially dangerous for camera saturation reasons but options such as:
+            1. Covering sample plane with opaque cover
+            2. Being able to abort program mid-scan
+            3. Able to change exposure/gain mid-scan makes this safer'''
+            #careful of self.Stage and self. ; aliases or wrappers because implementation can be completely different
+            #managling to avoid namespace conflict
+        if percentage_power is None:
+            percentage_power = -1
+        self.Stage._turn_on_light(actual_percentage_power= percentage_power if percentage_power != -1 else self.Stage._turn_on_light(actual_percentage_power = 99))
+
 
     def turn_off_light(self):
-        self.Stage.turn_off_light()
+        self.Stage._turn_off_light()
         
         # ------------------------- #
     # Helper function
@@ -1406,11 +1431,12 @@ class HSI_Scanner:
         y_distance_mm,
         stage_speed,
         save_folder,
+        LED_power,
         bin_factors,
         _pause_between_grids: float = 1,
         custom_home_spot: bool = True,
         home_points: list | None = None,
-    ):
+    ) -> bool:
         """
         Pre-scan wrapper around the pushbroom scan.
 
@@ -1420,7 +1446,7 @@ class HSI_Scanner:
         - If custom_home_spot=False, we treat (0,0,0) as the only home and scan once.
         """
 
-        self.turn_on_light()   # <--- Add this at start
+        self.turn_on_light(percentage_power = LED_power)   # <--- Add this at start
 
         # If home_points not passed, initialize to a single default tuple
         # (same semantics as the old recursive version)
@@ -1437,6 +1463,7 @@ class HSI_Scanner:
             # should factor this into general debug call eventually like
             # seen in the scan_tile section
             debug_file_callable = DebugTimer.make_local_debug_txt_file_json
+
 
         def _run_push_broomscan(home_points_for_naming) -> None:
             """
@@ -1497,12 +1524,14 @@ class HSI_Scanner:
             #try:
             for a in range(rows):
                 # Move Y to correct position for this row in real space (a → y)
-                y_pos = (a * y_step) + y0_asi
-                self.Stage.move_stage(y=y_pos)
+                y_start = (a * y_step) + y0_asi
+                self.Stage.set_max_speed('Y', 2) #set a second time for both modularity and seems to be issues if program is running for >24 hours - 36 hours with set speed?
+
+                self.Stage.move_stage(y=y_start)
                 self.Stage.wait_for_device()
                 time.sleep(1)
-                y_real_pos = self.Stage.get_position('Y')
-                print(f"Moved to Y row {a} at {y_real_pos / 10000:.4f} mm")
+                #y_real_pos = self.Stage.get_position('Y')
+                #print(f"Moved to Y row {a} at {y_real_pos / 10000:.4f} mm") <-- can cause crashes so will remove
 
                 # Determine snake pattern
                 is_even = a % 2 == 0
@@ -1519,8 +1548,23 @@ class HSI_Scanner:
                 for b in range(cols):
                     #try:
                         delta = direction * x_step
-                        x_real = self.Stage.get_position('X') / 10000
-                        y_real = self.Stage.get_position('Y') / 10000
+                        try:
+                            # Attempt 1: real ASI-2000 position
+                            x_real = self.Stage.get_position('X') / 10000.0
+                            y_real = self.Stage.get_position('Y') / 10000.0
+
+                        except Exception as asi_err:
+                            try:
+                                # Attempt 2: calculated fallback
+                                x_real = x_start
+                                y_real = y_start
+
+                            except Exception as calc_err:
+                                raise RuntimeError(
+                                    "Neither ASI-2000 position query nor calculated fallback succeeded"
+                                ) from calc_err
+
+                            
                         print(f"Starting tile (a={a}, b={b}) at (x={x_real:.4f}, y={y_real:.4f}) mm")
 
                         self.scan_tile(
@@ -1665,7 +1709,7 @@ class HSI_Scanner:
             getattr(self, "_snapshot_event")  # just check existence
             _check_snapshot = self._snapshot_event.set
         except AttributeError:
-            DebugExceptions.send_custom_attribute_error("_snapshot_event", o=self)
+            DebugExceptions.MyAttributeError.custom_warning("_snapshot_event", o=self)
             _check_snapshot = lambda: None  # no-op if missing
 
         # call safely
@@ -1676,7 +1720,6 @@ class HSI_Scanner:
 
         # Throttle status polls a bit (serial is slow). Tune 2..8; 4 is a safe start. Found worse results polling every second frame
         poll_div = 2
-        
         
         self.Stage.move_stage(x=delta_x, relative=True)
 
@@ -2716,7 +2759,7 @@ class Make_GUI:
                 "x_start_mm": 0.0,
                 "y_start_mm": 0.0,
                 "z_start_mm": 0.0,
-                "dx_mm": 24.8,
+                "dx_mm": 25.0,
                 "dy_mm": 25.0,
                 "rows": 3,
                 "cols": 4
@@ -2804,16 +2847,20 @@ class Make_GUI:
 
         return homes
 
-
-        
         #scan_type: TypedDict[x_dist: str, y_dist: str, stage_speed: str] = {}
         #SPD.needs_factory(Make_Dict)   
         # Optional: your existing central map, if you have it.
 
 
-    def _normalize(self, s: str) -> str:
-        """Normalize key names to improve fuzzy matching (lower, strip non-alnum)."""
-        return re.sub(r"[^a-z0-9]+", "", s.lower())
+    def _normalize(self, s: str) -> Optional[str] | Optional[Any]:
+        if not isinstance(s, str):
+            return s
+        try:
+            return re.sub(r"[^a-z0-9]+", "", s.lower())
+        except RuntimeError as e:
+            print(f"Problem with current string normalization: {s}")
+            print(f"Function: {self._normalize.__name__}")
+            print(f"~Line # {DebugTimer.get_line_number()}")
 
     def _build_binding_map(
         self,
@@ -2932,26 +2979,26 @@ class Make_GUI:
             # --- Radio + Frame for Dark Cube ---
             [sg.Radio("Dark Correction Cube", "CUBE_TYPE", key="radio_dark", default=True),
             sg.Frame(
-                "",
-                [
+                title = "",
+                layout = [
                     [sg.Text("Number of frames to average", size=(20, 1)),
                     sg.InputText(str(_default_frames), key="d_key_num", size=(8, 1))],
                     [sg.Button("Set correction", key="d_key")]
                 ],
-                relief=sg.RELIEF_RIDGE,
+                relief="sunken",
                 border_width=2
             )],
 
             # --- Radio + Frame for Response Cube ---
             [sg.Radio("Response Correction Cube", "CUBE_TYPE", key="radio_resp"),
             sg.Frame(
-                "",
-                [
+                title = "",
+                layout = [
                     [sg.Text("Number of frames to average", size=(20, 1)),
                     sg.InputText(str(_default_frames), key="r_key_num", size=(8, 1))],
                     [sg.Button("Set correction", key="r_key")]
                 ],
-                relief=sg.RELIEF_RIDGE,
+                relief= "sunken",
                 border_width=2
             )],
 
@@ -2989,8 +3036,8 @@ class Make_GUI:
     def show_gui(self):
         print(f"[GUI] Showing GUI with default_folder: {self.default_folder}, previous_user_folder: {self.previous_user_folder}")
         
-        layout = [
-            [sg.Text("HSI Scan Configuration")],
+        main_layout = [
+            [sg.Text(text = "HSI Scan Configuration", relief = "groove", font=("Source Code Pro", 18, "bold"), justification = 'center', background_color = "#33A4AC")],
             [sg.Text("Run with Debug?", tooltip="DONT USE UNLESS BEN"),
             sg.Radio("Yes", "DEBUG", key="debug_yes", default=False, metadata=bool),
             sg.Radio("No", "DEBUG", key="debug_no", default=True, metadata=bool)],
@@ -3003,7 +3050,9 @@ class Make_GUI:
             [sg.HorizontalSeparator(color="#00CCCC", key="sep_top2", pad=10)],
 
             [
-                sg.Frame("Stage-specific parameters adjusted scan type", 
+                                        # making all below sg.elements have proper alignment by fixing size of element
+            sg.Frame("MS 2000 stage-specific parameters -- adjust for scan type", font = ("Input", 16, "italic"),
+                        #for font param; 'name size styles' works
                     layout=[
                         [sg.Text("Scan mode type",
                                 tooltip="Both are technically not mutually exclusive; both option can be added later on"),
@@ -3012,7 +3061,8 @@ class Make_GUI:
                         sg.Radio("Fluorescence", key="fluoro", default=False, enable_events=True,
                                 group_id="scan_mode_type", metadata=bool)],
 
-                        [sg.Text("Rows:"), sg.InputText("5", key="rows", metadata=int,
+                        [sg.Text("Rows:"), sg.InputText("5", key="rows", pad = ((180,0), (0,0)), metadata=int, 
+                                                        #pad = ((left,right), (top, bottom))
                                                         tooltip="DONT USE MORE THAN 5 IF DOING WELLS/DISH")],
                         [sg.Text("Columns:"), sg.InputText("5", key="cols", metadata=int,
                                                         tooltip="DONT USE MORE THAN 5 IF DOING WELLS/DISH")],
@@ -3035,32 +3085,52 @@ class Make_GUI:
                                     key="check_asi_info", default=False)],
                     ],
                     title_location=sg.TITLE_LOCATION_TOP,
-                    relief=sg.DEFAULT_SLIDER_RELIEF,
-                    border_width=10,
+                    relief= "sunken",
+                    border_width=3,
                     tooltip="Values should autoupdate upon selection of fluoro/brightfield")
             ],
-
             [sg.HorizontalSeparator(color="#00CCCC", key="sep_mid1", pad=10)], 
             [sg.HorizontalSeparator(color="#04D6D6", key="sep_mid2", pad=10)], 
+                [
+                sg.Frame("Camera specific parameters [camera = acA1920-155um] ", font=("Input", 16, "italic"),
+                        layout = [
+                    # ---- Binning and imaging options ----
+                    [sg.Text("Spectral bin:"), sg.InputText("6", key="spectral_bin", metadata=int)],
+                    [sg.Text("Spatial bin:"), sg.InputText("2", key="spatial_bin", metadata=int)],
+                    [sg.Text("Line bin:"), sg.InputText("1", key="line_bin", metadata=int)],
 
-            # ---- Binning and imaging options ----
-            [sg.Text("Spectral bin:"), sg.InputText("6", key="spectral_bin", metadata=int)],
-            [sg.Text("Spatial bin:"), sg.InputText("2", key="spatial_bin", metadata=int)],
-            [sg.Text("Line bin:"), sg.InputText("1", key="line_bin", metadata=int)],
+                    [sg.Text("Exposure Time (ms):"), sg.InputText("16.33", key="exposure_time", metadata=float)],
+                    [sg.Text("Gain (dB):"), sg.InputText("20", key="gain", metadata=float)],
+                    [sg.Button("Set Correction Cubes")],
 
-            [sg.Text("Exposure Time (ms):"), sg.InputText("16.33", key="exposure_time", metadata=float)],
-            [sg.Text("Gain (dB):"), sg.InputText("20", key="gain", metadata=float)],
-            [sg.Button("Set Correction Cubes")],
+                    
 
-            [sg.Text("Save folder:"),
-            sg.InputText(str(self.previous_user_folder), key="save_folder", metadata=str,
+                    [sg.Button("Start Scan"), sg.Button("Cancel")]
+                    ],
+                    title_location= sg.TITLE_LOCATION_TOP,
+                    border_width=4,
+                    tooltip="Values should autoupdate upon selection of fluoro/brightfield")
+                ],
+            [sg.HorizontalSeparator(color="#00CCCC", key="sep_mid1", pad=10)], 
+            [sg.HorizontalSeparator(color="#04D6D6", key="sep_mid2", pad=10)], 
+                [
+                sg.Frame("Other settings", font=("Input", 16, "italic"),
+                        layout = [
+                    [sg.Text("Save folder:"),
+                        sg.InputText(str(self.previous_user_folder), key="save_folder", metadata=str,
                         tooltip=f'default_folder_path is {self.default_folder}'),
-            sg.FolderBrowse(initial_folder=str(self.previous_user_folder or self.default_folder))],
-
-            [sg.Button("Start Scan"), sg.Button("Cancel")]
+                    sg.FolderBrowse(initial_folder=str(self.previous_user_folder or self.default_folder))],
+                    
+                    [sg.Text("Brightfield LED power value")],
+                    [sg.Slider((0,99), default_value = 99, orientation = "horizontal", resolution = 1, enable_events = True, 
+                               key = "LED_power", metadata = int)],
+                        #default value 99 to match brightfield here
+                                ]
+                        )
+                ],
         ]
 
-        window = sg.Window("HSI Scanner", layout, use_default_focus=False, keep_on_top=True)
+        window = sg.Window("HSI Scanner", main_layout, use_default_focus=False, keep_on_top=True)
         window.read(timeout=0)  # “prime” the window
 
         current_defaults = self._load_defaults("bright")
@@ -3149,6 +3219,7 @@ class Make_GUI:
         
         
     def run_scan(self):
+
         if not self.params:
             print("[RUN] No params set. Run show_gui() first.")
             return
@@ -3185,32 +3256,35 @@ class Make_GUI:
             params["spatial_bin"],
             params["line_bin"]
         )
-
+        
         Scanner.pre_scan_check(
+            #ordering and repetition matters here; e.g. had failrue because <params["save_folder"],> was in signature line twice
             params["rows"],
             params["cols"],
             params["x_distance"],
             params["y_distance"],
             params["stage_speed"],
             params["save_folder"],
-            bin_factors=user_bin_factors,
-            custom_home_spot=custom_home_spot,
-            home_points=generated_home_points
+            params["LED_power"],
+            bin_factors = user_bin_factors,
+            custom_home_spot = custom_home_spot,
+            home_points = generated_home_points
         )
         sg.popup("Scan complete!")
 
         
-########-------DEBUGGING CLASS ####------------######
+########-------DEBUGGING CLASS(ES)! ####------------######
    # ######################################
    # ######################################\
    ##     #   \ | /    _     _   \ | /  #
      #   #  -- o o --/ o\~~~/o\-- o o --#\
    #     #    ( v ) (    . .    ) ( v ) #    \
-    #   #   /_____\ \__\_v_/__/ /_____\#
+     #   #   /_____\ \__\_v_/__/ /_____\# # |
     ################################
    # ######################################
    # ######################################
    
+
 class DebugProgram(ABC):
     """Abstract foundation for debug utilities.
 
@@ -3225,37 +3299,57 @@ class DebugProgram(ABC):
     
     @staticmethod
     def get_line_number() -> int:
-        """Utility method available to all derived tools."""
         frame = inspect.currentframe()
-        if frame is not None:
-            caller_frame = frame.f_back
-            if caller_frame is not None:
-                return caller_frame.f_lineno
-        return -1
+        try:
+            if frame and frame.f_back:
+                return frame.f_back.f_lineno
+            return -1
+        finally:
+            del frame
+# Base filter interface
+
+class CustomWarningsFilter(ABC):
     
-class DebugExceptions(DebugProgram):
     @staticmethod
     def place_holder_method():
         pass
-    
-    class MyDeletionWarning(Warning):
-        """Non-fatal cleanup warning."""
+
+    @classmethod
+    @abstractmethod
+    def custom_warning(cls, *errors, o: object):
+        """Each warning subclass must implement this"""
         pass
 
-    class MyAttributeError(Warning):
-        """Critical error; Warning of missing attribute in given class: """
-        def __init__(self, message: str = "") -> None:
+
+# Concrete DebugExceptions container
+class DebugExceptions:
+
+    class MyDeletionWarning(Warning, CustomWarningsFilter):
+        """Non-fatal cleanup warning; no item to delete."""
+
+        @classmethod
+        def custom_warning(cls, message: str = None, o: object = None):
+            if message:
+                warnings.warn(message, cls)
+
+    class MyAttributeError(Warning, CustomWarningsFilter):
+        """Critical error; Warning of missing attribute"""
+
+        def __init__(self, message: str = ""):
             doc = self.__class__.__doc__ or ""
-            super().__init__(self, f'{doc} --> {message}')
-            
-        
-    @staticmethod
-    def send_custom_attribute_error(*attributes_missing: str, o: object ) -> None:
-        #can check for special cases here but will default to generic message for now
-        obj_name = type(o).__name__
-        for attribute in attributes_missing:
-            warnings.warn(f"within obj {obj_name}; Missing attribute: '{attribute}'", DebugExceptions.MyAttributeError)
-            
+            super().__init__(f"{doc} --> {message}")
+
+        @classmethod
+        def custom_warning(cls, *attributes_missing, o: object = None):
+            assert attributes_missing is not None
+            warnings.filterwarnings("always", category=cls)
+            obj_name = type(o).__name__ if o else "<unknown>"
+            for attr in attributes_missing:
+                warnings.warn(
+                    f"Within object {obj_name}; Missing attribute: '{attr}'",
+                    cls
+                )
+
     @staticmethod
     def delete_global_names(*names: str) -> None:
         g = globals()
@@ -3283,7 +3377,6 @@ class DebugExceptions(DebugProgram):
                     DebugExceptions.MyDeletionWarning,
                 )
         gc.collect()
-        
         
 class DebugTimer(DebugProgram):
     '''Useful notes to self:
@@ -3442,9 +3535,19 @@ if __name__ == "__main__":
 -------------===============------------------------===============------------------------===============-----------
 -------------===============------------------------===============------------------------===============------------------------===============-----------
 high prio/debug:
+    ==> Address ping-ASI console so it's almost fail_safe; will do 900 (30 x 30) brightfield scans at 0.1 mm distance delta y and delta x; 10x to see if failure happens once
+        Results: PASSED - exactly 1800 files (1 data 1 header file) ✅ ✅ ✅ 
+    ==> Change GUI lay-out --> Make categories more distinct and style more eye-friendly ✅ ; can still improve further
+    
+    ==> Power on/off for external arduino mini USB added; probably as new file for clarity on own process? Use case is for turning on/off helmholtz coils
+    ==> Research turret rotation automation --> Command: "M T = 1" --> moves to turret 1 for current firmware cached addresses; can change on '@' reset
+        --> Firmware version 9.2m and above has both: "SAFE_TURRET" movement and remove shortest distance turret rotation commands 
+        --> cc https://asiimaging.com/docs/filter_and_turret_changer
+    ==> Fix warning structure in DebugExceptions ✅X
     ==> **ADD PY_INIT FILE
     ==> **Add primary camera to own process; should be seperate from main so no dependency thread conflict (e.g. cv2) or thrown errors crashing program**⬅️⬅️⬅️⬅️
-    ==>     ==> **ADD POWER SLIDER FOR BRIGHTFIELD LIGHT** ⬅️⬅️⬅️⬅️
+    ==>     ==> **ADD POWER SLIDER FOR BRIGHTFIELD LIGHT** ⬅️⬅️⬅️⬅️ ✅✅
+          *****      ==> Need to make it in the header file be apart of typed dictionaries when swapping
     ==> Rename current files for consistency --> all caps for clarity within local repo whats actually uploaded to git✅
     ==> After start separating classes into seperate files as needed
 

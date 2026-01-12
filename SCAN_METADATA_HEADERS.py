@@ -53,14 +53,14 @@ class Const:
     KEY_ROWS: Final[str]        = "rows"
     KEY_COLS: Final[str]        = "cols"
     KEY_MAG: Final[str]         = "mag"
-
+    KEY_DEF_LED_POW: Final[str] = "default_led_power"
     # Defaults: BRIGHT
-    VAL_BRIGHT_X_DISTANCE: Final[float]      = 0.938 #1.02
+    VAL_BRIGHT_X_DISTANCE: Final[float]      = 0.938 #1.02 gives roughly 1001 lines on 16.33 ms exposure + 0.0623 mm/s stage speed
     VAL_BRIGHT_Y_DISTANCE: Final[float]      = 0.938
     VAL_BRIGHT_STAGE_SPEED: Final[float] = 0.0623
     VAL_BRIGHT_EXPOSURE: Final[float]    = 16.33
     VAL_BRIGHT_GAIN: Final[int]          = 1
-
+    VAL_BRIGHT_LED_POWER: Final[int]     = 99 #by default put on max power for brightfield; user can still modify final result; 0-99 indexed
     # Defaults: FLUORO
     #VAL_FLUORO_X_DISTANCE: Final[float]      = 0.4
     VAL_FLUORO_X_DISTANCE: Final[float]      = 0.1
@@ -69,7 +69,7 @@ class Const:
     VAL_FLUORO_STAGE_SPEED: Final[float] = 0.0023 #0.00.0023 #was originally ~0.002 mm/s
     VAL_FLUORO_EXPOSURE: Final[float]    = 750 #427 <-- REAL #563.3 is opposite scaling; #600  #was originally 490 ms
     VAL_FLUORO_GAIN: Final[int]          = 23 #20
-
+    VAL_FLUORO_LED_POWER: Final[int]     = 0
     # Defaults: GRID/MAG
     VAL_WELLS_ROWS: Final[int] = 5
     VAL_WELLS_COLS: Final[int] = 5 
