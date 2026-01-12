@@ -575,11 +575,15 @@ class MS2000(SerialPort):
         self.send_command_normal(f"MOVE {axis}={distance}")
         self.read_response()
 
-    def set_max_speed(self, axis: str, speed: float):
-        """Speed in mm/s (direct, no conversion).""" #maximum speed is = 7.5 mm/s for standard 6.5 mm pitch leadscrews
-        print(f'set_max_speed func which axis {axis} and speed {speed} mm/s and type {type(axis)}')
-        self.send_command_normal(f"SPEED {axis}={speed}")
-        self.read_response()
+    def set_max_speed(self, axis: str, speed: float) -> float:
+        if speed == 0:
+            return speed
+        else:
+            """Speed in mm/s (direct, no conversion).""" #maximum speed is = 7.5 mm/s for standard 6.5 mm pitch leadscrews
+            print(f'set_max_speed func which axis {axis} and speed {speed} mm/s and type {type(axis)}')
+            self.send_command_normal(f"SPEED {axis}={speed}")
+            self.read_response()
+            return speed
 
     def is_axis_busy(self, axis: str) -> bool:
         self.send_command_normal(f"RS {axis}?")
@@ -1542,9 +1546,15 @@ class HSI_Scanner:
                     x_start = x0_asi
                 else:
                     x_start = x0_asi + (cols) * x_step
+                
+                debug_var = self.Stage.set_max_speed('X', 0)
+                #self.Stage.set_max_speed('X', 1.5) #speed should implicitly be 
                 self.Stage.move_stage(x=x_start)
                 self.Stage.wait_for_device()
-            #ADDED TRY AND CATCH LAST NIGHT ANALYSIS 2 VERSIONS OF IT I THINK
+                print("CHECKING IF THE CHANGE IN X SUPERGRID GOES AT PROPER SPEED")
+                self.Stage.set_max_speed('X', stage_speed)
+
+            #This should be logic for within subgrid; delta x movement 
                 for b in range(cols):
                     #try:
                         delta = direction * x_step
@@ -1555,8 +1565,8 @@ class HSI_Scanner:
 
                         except Exception as asi_err:
                             try:
-                                # Attempt 2: calculated fallback
-                                x_real = x_start
+                                # Attempt 2: calculated fallback from outer nested loop
+                                x_real = x_start 
                                 y_real = y_start
 
                             except Exception as calc_err:
@@ -1595,6 +1605,9 @@ class HSI_Scanner:
         # ---- Iterative version of the old recursive home-point loop ----
         while True:
             # Move to the next home point (or to (0,0,0) if custom_home_spot is False)
+            self.Stage.set_max_speed('X', 1.5)
+            self.Stage.set_max_speed('Y', 2)
+            
             if custom_home_spot:
                 home_points_left = self.move_camera_home(custom_home_spot, *home_points_current)
             else:
