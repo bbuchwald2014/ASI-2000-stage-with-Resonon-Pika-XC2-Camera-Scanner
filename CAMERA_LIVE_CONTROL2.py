@@ -154,14 +154,14 @@ class CameraAppChild(CameraApp):
             self.camera.ExposureAuto.SetValue('Off')
 
         self.gain_min = getattr(self.camera.Gain, "Min", 0.0)
-        self.gain_max = getattr(self.camera.Gain, "Max", 30.0)
+        self.gain_max = getattr(self.camera.Gain, "Max", 20.0)
         self.exp_min  = getattr(self.camera.ExposureTime, "Min", 100.0)
         self.exp_max  = getattr(self.camera.ExposureTime, "Max", 1000000.0)
 
         if hasattr(self.camera.Gain, "Value"):
             self.camera.Gain.Value = 0
         if hasattr(self.camera.ExposureTime, "SetValue"):
-            self.camera.ExposureTime.SetValue(3000)
+            self.camera.ExposureTime.SetValue(16300)#(160000)
 
         self.camera.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)
 

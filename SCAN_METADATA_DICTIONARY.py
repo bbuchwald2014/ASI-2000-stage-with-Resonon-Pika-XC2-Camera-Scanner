@@ -1,9 +1,12 @@
+'''Need to fix superstage, magnification, z-stack, here along with LED params implementation'''
+
 # params_factory.py
 from __future__ import annotations
 
 from typing import Any, Literal, Required, TypedDict, Unpack, overload, cast
 from SCAN_METADATA_HEADERS import Const, StrNum, SchemaName
 
+'''Should be assumed for naming scheme if it's positive use-case unless stated otherwise like <class HasNoLED> '''
 
 # ---------- Mixins ----------
 class HasSchema(TypedDict):
@@ -13,9 +16,15 @@ class HasXY(TypedDict, total=False):
     x_dist: StrNum
     y_dist: StrNum
 
-class HasSpeed(TypedDict, total=False):
-    stage_speed: StrNum
+class HasXSpeed(TypedDict, total=False):
+    x_stage_speed: StrNum
 
+class HasZ(TypedDict, total = False):
+    z_distance: StrNum
+
+class HasZSpeed(TypedDict, total = False):
+    z_stage_speed: StrNum
+    
 class HasExposure(TypedDict, total=False):
     exposure_time: StrNum
     gain: StrNum
@@ -40,35 +49,41 @@ class HasSuperGrid(TypedDict, total=False):
     delta_super_columns: StrNum
 
 
-# ---------- Concrete param shapes ----------
+# ---------- Concrete param shapes of dicts that will be interfacing default settings to GUI with and without user-input----------
+      ### ORDER IS class _____ (typealias, inheritence)
 class MagnificationParams(HasSchema):
     schema: Literal["mag"]
     mag: StrNum
 
+class ZStackParams(HasSchema, HasZ, HasZSpeed):
+    schema: Literal["z_stack"]    
+    
 class WellParams(HasSchema, HasGrid):
     schema: Literal["well_sample"]
 
 class PlateParams(HasSchema, HasGrid):
     schema: Literal["plate_sample"]
 
-class BrightfieldParams(HasSchema, HasXY, HasSpeed, HasExposure, HasSuperGrid, HasLED):
+class BrightfieldParams(HasSchema, HasXY, HasXSpeed, HasExposure, HasSuperGrid, HasLED):
     schema: Literal["bright"]
 
-class FluoroParams(HasSchema, HasXY, HasSpeed, HasExposure, HasGrid, HasSuperGrid, HasNoLED): #
+class FluoroParams(HasSchema, HasXY, HasXSpeed, HasExposure, HasGrid, HasSuperGrid, HasNoLED): #
     schema: Literal["fluoro"]
 
 # Keep total=True; we’ll return a fully-populated dict for debug
-class DebugParams(HasSchema, HasXY, HasSpeed, HasExposure, HasGrid, total=True):
+class DebugParams(HasSchema, HasXY, HasXSpeed, HasExposure, HasGrid, total=True):
     schema: Literal["debug_yes"]
     mag: StrNum
-
-
+    
+    
 ParamsUnion = (
-    BrightfieldParams
-    | FluoroParams
-    | MagnificationParams
+    MagnificationParams
+    | ZStackParams
     | WellParams
     | PlateParams
+    | BrightfieldParams
+    | FluoroParams
+    | MagnificationParams
     | DebugParams
 )
 
@@ -78,7 +93,7 @@ _DEFAULTS: dict[str, dict[str, StrNum]] = {
     "bright": {
         Const.KEY_X_DISTANCE:      Const.VAL_BRIGHT_X_DISTANCE,
         Const.KEY_Y_DISTANCE:      Const.VAL_BRIGHT_Y_DISTANCE,
-        Const.KEY_STAGE_SPEED: Const.VAL_BRIGHT_STAGE_SPEED,
+        Const.KEY_X_STAGE_SPEED: Const.VAL_BRIGHT_X_STAGE_SPEED,
         Const.KEY_EXPOSURE:    Const.VAL_BRIGHT_EXPOSURE,
         Const.KEY_GAIN:        Const.VAL_BRIGHT_GAIN,
         Const.KEY_ROWS:        Const.VAL_PLATE_ROWS,
@@ -88,7 +103,7 @@ _DEFAULTS: dict[str, dict[str, StrNum]] = {
     "fluoro": {
         Const.KEY_X_DISTANCE:      Const.VAL_FLUORO_X_DISTANCE,
         Const.KEY_Y_DISTANCE:      Const.VAL_FLUORO_Y_DISTANCE,
-        Const.KEY_STAGE_SPEED: Const.VAL_FLUORO_STAGE_SPEED,
+        Const.KEY_X_STAGE_SPEED: Const.VAL_FLUORO_X_STAGE_SPEED,
         Const.KEY_EXPOSURE:    Const.VAL_FLUORO_EXPOSURE,
         Const.KEY_GAIN:        Const.VAL_FLUORO_GAIN,
         Const.KEY_ROWS:        Const.VAL_WELLS_ROWS,
@@ -118,10 +133,15 @@ _DEFAULTS: dict[str, dict[str, StrNum]] = {
     "mag": {
         Const.KEY_MAG: Const.VAL_MAG_DEFAULT,
     },
+    "z_stack": {
+        Const.KEY_Z_DISTANCE: Const.VAL_Z_DISTANCE,
+        Const.KEY_Z_STAGE_SPEED: Const.VAL_Z_STAGE_SPEED,
+        Const.KEY_NUM_Z_SLICES: Const.VAL_NUM_Z_SLICES
+    },
 }
 # ---------- Tiny builder helper (flat, schema-aware) ----------
 def _build_from(
-    schema: Literal["bright", "fluoro", "mag", "well_sample", "plate_sample"],
+    schema: Literal["bright", "fluoro", "mag", "well_sample", "plate_sample", "z_stack"],
     overrides: dict[str, Any],
 ) -> dict[str, Any]:
     """
@@ -152,6 +172,9 @@ def _build_well(**kw: Unpack[WellParams]) -> WellParams:
 def _build_plate(**kw: Unpack[PlateParams]) -> PlateParams:
     return cast(PlateParams, _build_from("plate_sample", kw))
 
+def _build_zstack(**kw: Unpack[ZStackParams]) -> ZStackParams:
+    return cast(ZStackParams, _build_from("z_stack", kw))
+
 def _build_debug(**kw: Unpack[DebugParams]) -> DebugParams:
     """
     Debug = bright defaults + plate defaults + user overrides.
@@ -168,13 +191,12 @@ def _build_debug(**kw: Unpack[DebugParams]) -> DebugParams:
     for k in (
         Const.KEY_MAG, Const.KEY_ROWS, Const.KEY_COLS,
         Const.KEY_X_DISTANCE, Const.KEY_Y_DISTANCE,
-        Const.KEY_STAGE_SPEED, Const.KEY_EXPOSURE, Const.KEY_GAIN
+        Const.KEY_X_STAGE_SPEED, Const.KEY_EXPOSURE, Const.KEY_GAIN
     ):
         if k in kw:
             out[k] = kw[k]
 
     return cast(DebugParams, out)
-
 
 # ---------- Factory with overloads ----------
 class MakeParams:
@@ -196,7 +218,10 @@ class MakeParams:
     @overload
     @staticmethod
     def create__dict(*, schema: Literal["debug_yes"], **kw: Unpack[DebugParams]) -> DebugParams: ...
-
+    @staticmethod
+    @overload
+    def create__dict(*, schema: Literal["z_stack"], **kw: Unpack[ZStackParams]) -> ZStackParams: ...
+    
     @staticmethod
     def create__dict(*, schema: SchemaName, **kw: Any) -> ParamsUnion:
         if schema == "bright":
@@ -211,4 +236,6 @@ class MakeParams:
             return _build_plate(**kw)
         if schema == "debug_yes":
             return _build_debug(**kw)
+        if schema == "z_stack":
+            return _build_zstack(**kw)
         raise ValueError(f"Unknown schema: {schema!r}")
