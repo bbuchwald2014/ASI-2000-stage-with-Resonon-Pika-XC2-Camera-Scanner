@@ -16,7 +16,10 @@
     
 #    *Looks like 490 ms integration, 0.00204 mm/s, 0.0762 distance 20 gain, predicted line count ~ 200
 #
-                
+
+from __future__ import annotations #because of a nested typed dict class with that typed dict returned when not instaniated
+                                    # implemented when returning user z_stack params to main GUI scope
+               
 import sys
 import os
 from pathlib import Path
@@ -25,7 +28,7 @@ import time
 import numpy as np
 import regex as re
 import keyboard # pip install keyboard
-from typing import Tuple, List, Iterable
+from typing import Tuple, List, Iterable, Sequence
 from typing import Callable, TypeVar, Any, Optional, Dict, Union
 from itertools import product  # --- Build permutation tree of (debug_type, strategy_type) ---
 import gc
@@ -44,6 +47,7 @@ from math import floor
 from dataclasses import dataclass, field
 from pypylon import pylon
 from functools import singledispatchmethod, partial
+
 # -----------COMPUTER VISION-------------- #
 import cv2
 
@@ -62,10 +66,11 @@ del verbose
     
 sys.path.append(r"E:\Users\Ben\Programs\HSI Programs\z")
 from AUX_IMPORTS import ensure_packages, import_pysimplegui, safe_import
-import CAMERA_LIVE_CONTROL2 as focus
+import CAMERA_LIVE_CONTROL2 as focus  
 from typing import TypedDict
 import SCAN_METADATA_DICTIONARY as SMF #Custom class-module to hold metadata for GUI and .JSON files efficiently
 import SCAN_METADATA_HEADERS as SMH 
+
 # ------------------------- #
 # Safe imports Check
 # ------------------------- #
@@ -97,17 +102,18 @@ from typing import Optional
 import inspect
 import warnings
 
-'''TEMPORARY GLOBALS FOR CONVENIENCE'''
+'''TEMPORARY GLOBALS FOR CONVENIENCE; Should be put into separate meta or header file eventually or within runtime objects'''
 ##HSI SCANNER INIT##
 ENABLE_LIVE_KEYBOARD = True
-ENABLE_MINIMUM_CAMERA_SETTINGS = True
+ENABLE_MINIMUM_CAMERA_SETTINGS = True #is mandatory in current set-up
 USER_CONTINOUS_SECONDARY_CAMERA_SNAPSHOT = False
-USE_SECONDARY_CAMERA = True
+USE_SECONDARY_CAMERA = False
 ##MAKE_GUI CLASS##
 DEFAULT_FOLDER = Path(r"E:\Users\Ben\Programs\HSI Programs\z\Data") #string arg not os.path arg --> changed to Path obj not for flexibility
 #DEFAULT_FOLDER = pathlib.Path(r"E:\Users\Ben\Programs\HSI Programs\z\Data\working_camera_2")
 SAVE_DIR_CONST = r"E:\Users\Ben\Programs\HSI Programs\z\Data\working_camera_8_with_wells_option"
 # ------------------------- #
+
 
 
 # If DEFAULT_FOLDER isn't defined elsewhere, fall back to a local "meta" folder.
@@ -176,9 +182,6 @@ from serial.tools import list_ports
 from pypylon import pylon
 import PySimpleGUI as sg  # type: ignore ##SUPRESSION!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
-
-import os
-import sys
 import importlib.util
 from typing import Optional
     
@@ -408,7 +411,6 @@ class MS2000(SerialPort):
         if stage_baud_rate not in self.BAUD_RATES:
             raise ValueError("Invalid baud rate for MS2000")
 
-
     def close(self):
         try:
             if self.is_open():
@@ -430,11 +432,11 @@ class MS2000(SerialPort):
         """
         cmd_parts = []
         if x is not None:
-            cmd_parts.append(f"X={int(x)}")
+            cmd_parts.append(f"X={round(x)}")
         if y is not None:
-            cmd_parts.append(f"Y={int(y)}")
+            cmd_parts.append(f"Y={round(y)}")
         if z is not None:
-            cmd_parts.append(f"Z={int(z)}")
+            cmd_parts.append(f"Z={round(z)}")
         if not cmd_parts:
             return  # nothing to move
 
@@ -474,70 +476,113 @@ class MS2000(SerialPort):
 
         return home_points
 
-
-
     def get_position(self, axis: str) -> Optional[Union[int, float]]:
         """
         Query the stage for its position along a given axis.
         """
 
-        def _read_position(axis: str, _attempt_num: int = 1) -> Optional[Union[int, float]]:
-            # --- First attempt: normal WHERE ---
-            resp = self.send_command_normal(f"WHERE {axis}", return_encoded=True)
-            resp = self.read_response()
+        axis = axis.upper().strip()
+        axis_to_index = {"X": 0, "Y": 1, "Z": 2}
+        if axis not in axis_to_index:
+            raise ValueError(f"axis must be one of {set(axis_to_index)}, got {axis!r}")
 
-            if (resp is None) and (_attempt_num <= 3):
-                _attempt_num += 1
-                print(f"[Fallback] Raw response: {resp!r}, type={type(resp)}")
-                time.sleep(2)
-                print(
-                    f"Attempt num: {_attempt_num},\tCalling _read_position func to reread current stage position"
-                )
-                print(f"On ~line num: {DebugTimer.get_line_number()}")
-                return _read_position(axis=axis, _attempt_num= _attempt_num)
+        def _drain_input(max_lines: int = 25) -> None:
+            """
+            Drain any already-buffered incoming lines so we don't accidentally parse a stale ':A ...'
+            from a previous command.
+            """
+            try:
+                for _ in range(max_lines):
+                    if getattr(self.serial_port, "in_waiting", 0) <= 0:
+                        break
+                    _ = self.serial_port.readline()
+            except Exception:
+                # If anything goes weird, don't let draining kill position reads.
+                pass
+
+        def _parse_position(value_str: Optional[str], axis: str) -> Optional[Union[int, float]]:
+            """Parse position from a response string."""
+            if not value_str or not isinstance(value_str, str):
+                return None
+
+            parts = value_str.split()
+            print(f"Parsed parts: {parts}")
+
+            # Expect ':A ...'
+            if len(parts) < 2:
+                return None
+            if parts[0] != ":A":
+                return None
+
+            nums = parts[1:]  # tokens after ':A'
+            if not nums:
+                return None
+
+            # ASI note: reply order is always X Y Z if multiple axes are returned
+            idx = axis_to_index[axis]
+
+            if len(nums) == 1:
+                token = nums[0]
+            else:
+                # If it returned multiple, assume X Y Z ordering
+                if len(nums) <= idx:
+                    return None
+                token = nums[idx]
+
+            try:
+                raw = float(token)
+                # keep your sign flip behavior
+                raw *= -1.0
+                return raw
+            except ValueError as e:
+                raise ValueError(f"{e} can't cast raw response in _parse_position") from e
+
+        def _read_position(axis: str, _attempt_num: int = 1) -> Optional[Union[int, float]]:
+            """
+            Recursive reader with fallback.
+            """
+            if _attempt_num > 5:
+                print(f"[Fast] get_position giving up after {_attempt_num - 1} attempts.")
+                return None
+
+            # Resync: clear any stale incoming replies before we issue WHERE/W.
+            _drain_input()
+
+            # --- First attempt: normal WHERE ---
+            # IMPORTANT: do NOT use return_encoded=True here (your send_command_normal returns bytes-written there).
+            self.send_command_normal(f"WHERE {axis}", return_encoded=False)
+            resp = self.read_response()
 
             print(f"[Fast] Raw response: {resp!r}, type={type(resp)}")
 
-            pos = _parse_position(resp)
+            # If nothing came back, retry
+            if not resp:
+                time.sleep(0.2)
+                return _read_position(axis=axis, _attempt_num=_attempt_num + 1)
+
+            pos = _parse_position(resp, axis=axis)
+
+            # Optional guard: ONLY enable if you're *sure* 1 is impossible in your units.
+            # if pos == 1:
+            #     pos = None
+
             if pos is not None:
                 return pos
 
             # --- Second attempt: fallback W ---
-            print("[Fast] Failed. Trying fallback 'W' command...")
-            resp = self.send_command_normal(f"W {axis}", return_encoded=True)
+            print("[Fast] Failed parse. Trying fallback 'W' command...")
+            _drain_input()
+            self.send_command_normal(f"W {axis}", return_encoded=False)
+            resp2 = self.read_response()
 
-            return _parse_position(resp)
+            print(f"[Fast] Raw response (W): {resp2!r}, type={type(resp2)}")
+            pos2 = _parse_position(resp2, axis=axis)
 
-        def _parse_position(value_str: Optional[str]) -> Optional[Union[int, float]]:
-            """Parse position from a response string."""
-            if not value_str:
-                return None
+            if pos2 is not None:
+                return pos2
 
-            if isinstance(value_str, str) and len(value_str) > 1:
-                parts = value_str.split()
-            else:
-                return None
-
-            print(f"Parsed parts: {parts}")
-
-            if len(parts) < 2:
-                return None
-
-            raw = parts[1]
-
-            # Try float first
-            try:
-                raw = float(raw)
-                try:
-                    raw *= -1.0
-                    return raw
-                except:
-                    pass
-                return raw
-            except ValueError as e:
-                raise ValueError(
-                    f"{e} can't cast raw response in _parse_position"
-                ) from e
+            time.sleep(0.2)
+            return _read_position(axis=axis, _attempt_num=_attempt_num + 1)
 
         try:
             return _read_position(axis)
@@ -548,8 +593,6 @@ class MS2000(SerialPort):
             except Exception as e2:
                 print(f"Retry also failed: {e2}")
                 return None
-
-
 
     def get_position_trycasters(self, axis: str, types_to_check: Iterable[type] = (int, float, str)) -> Optional[object]:
         try:
@@ -618,7 +661,7 @@ class MS2000(SerialPort):
         
         print("Waiting for device...")
         if axis is None:
-            while self.is_axis_busy('X') or self.is_axis_busy('Y'):
+            while self.is_axis_busy('X') or self.is_axis_busy('Y') or self.is_axis_busy('Z'):
                 time.sleep(0.005)
         else:
             while self.is_axis_busy(axis):
@@ -802,12 +845,32 @@ class HSI_Scanner:
             print(f"Index {i}: Model={dev.GetModelName()}, Serial={dev.GetSerialNumber()}, Friendly={dev.GetFriendlyName()} {marker}")
         print(f"Using camera with device_info: {device_info}")
 
-        # ---- Open primary camera ----
+            # ---- Open primary camera ----
         self.camera = pylon.InstantCamera(tl_factory.CreateDevice(device_info))
         self.camera.Open()
+        if self.camera.IsGrabbing():
+            self.camera.StopGrabbing()
+        print(f"{dir(self.camera)}\n\n")
 
+        our_node_map = self.camera.GetNodeMap()
+        print(f"{dir(our_node_map)}\n\n")
+
+        print(
+            f"Our callable objects:\n"
+            f"{[name for name in dir(our_node_map) if callable(getattr(our_node_map, name))]}"
+        )
+
+        import itertools
+        attrs_to_check: list[str] = ['GetNode', 'GetNodes', 'GetNumNodes']
+        acquisition_param_to_check: list[str] = ["AcquisitionFrameRate", "ResultingFrameRate", "ResultingFrameRateAbs"]
+        fkv_pairs = list(itertools.product(attrs_to_check, acquisition_param_to_check))
+
+        acq = "AcquisitionFrameRateEnable"
+        
+        self.modify_AcquisitionFrameRate()
+        
+        
         type(self)._install_dispatchers()
-
         # ---- Initial temperature (assuming this static/classmethod exists) ----
         self.initial_temperature = HSI_Scanner.get_temperature(which_subdevice=self.camera)
         
@@ -828,6 +891,15 @@ class HSI_Scanner:
         if USE_SECONDARY_CAMERA:
             _secondary_device_info = next((d for d in devices if d is not device_info), None)
             self.set_up_secondary_camera(secondary_info=_secondary_device_info, save_dir_override = Make_GUI.cur_dir)
+        else:
+            try:
+                self._set_camera_pixel_format("Mono12")
+
+            except LookupError as e: 
+                f'Could not use genicam funcs to modify data memory type camera will use at approximately line #{(DebugProgram.get_line_number)}'
+            
+            finally:             
+                self.memory_type = self.camera.PixelFormat.GetValue()        
 
     # ------------------------- #
     # Secondary camera helpers
@@ -917,7 +989,6 @@ class HSI_Scanner:
         _do_cleanup(self.camera)
         self.camera = None   # Remove reference so GC can collect
 
-
         print("HSI_Scanner closed gracefully.")
 
     def __del__(self):
@@ -930,9 +1001,11 @@ class HSI_Scanner:
         print("HSI_Scanner object destroyed.")
 
         #should be dispatched!!
+        
     def _set_camera_pixel_format(self, pixel_format):
         """Attempt to set the primary camera's pixel format with fallback to Mono8."""
         try:
+            print(f"INITIAL camera data type is {self.camera.PixelFormat.GetValue()}")
             supported_formats = self.camera.PixelFormat.GetSymbolics()
             if pixel_format in supported_formats:
                 self.camera.PixelFormat.SetValue(pixel_format)
@@ -960,6 +1033,7 @@ class HSI_Scanner:
                     self._set_camera_pixel_format(secondary_format)
                 else:
                     self._set_camera_pixel_format("Mono12")
+        
         except Exception as e:
             print(f"Failed to match pixel format: {e}")
             self._set_camera_pixel_format("Mono8 or Mono12")
@@ -982,26 +1056,107 @@ class HSI_Scanner:
         
         return exposure, gain
 
-    
     def turn_on_light(self, percentage_power: int):
         '''Default is for brightfield as of right now; potentially dangerous for camera saturation reasons but options such as:
-            1. Covering sample plane with opaque cover
+            1. Covering sample plane with opaque coversear
             2. Being able to abort program mid-scan
             3. Able to change exposure/gain mid-scan makes this safer'''
             #careful of self.Stage and self. ; aliases or wrappers because implementation can be completely different
             #managling to avoid namespace conflict
         if percentage_power is None:
             percentage_power = -1
-        self.Stage._turn_on_light(actual_percentage_power= percentage_power if percentage_power != -1 else self.Stage._turn_on_light(actual_percentage_power = 99))
-
+        self.Stage._turn_on_light(actual_percentage_power= percentage_power if percentage_power != -1 else 0)
 
     def turn_off_light(self):
         self.Stage._turn_off_light()
         
-        # ------------------------- #
-    # Helper function
-    # ------------------------- #
+    def modify_AcquisitionFrameRate(self) -> None:
+        '''This is a bug on basler's end none of the code works for changing ...<SetValue> method or akin to <False>
+        Best solution to avoid Resonon program hard limiting our camera instance's frame rate is to just set acquisition frame rate
+        to maximum frame rate possibe in the camera. Can verify this bug happens in 1.'Pylon Viewer' Software and going under 2."Acquisition
+        Control" subtab then looking for 3."Enable Acquisition" checkmark. This being checked causes the bug.  ✔✔✔
+        CC:
+            https://docs.baslerweb.com/acquisition-frame-rate#specifics for falsy documentation and explanation'''
+        
+        self.camera.AcquisitionFrameRateEnable.SetValue(False)
+        self.camera.AcquisitionFrameRateEnable.Value = False 
+        max_fps_val = self.camera.AcquisitionFrameRate.Value = 155
 
+        '''
+        self.set_acq_status = lambda truthy: our_node_map.GetNode(acq).SetValue(truthy)
+        self.get_acq_status = lambda _: our_node_map.GetNode(acq).GetValue()
+
+        print(self.get_acq_status(None))
+        _before = self.get_acq_status(None)
+
+        self.set_acq_status(truthy=False)
+
+        _after = self.get_acq_status(None)
+        print(f"{acq} before: {_before} after: {_after}")
+
+        print(f'{acq} attribute in {type(our_node_map)} is {self.get_acq_status(None)}')
+
+        for k, v in fkv_pairs:
+            try:
+                attr = getattr(our_node_map, k)
+                help(attr)
+                try:
+                    remove_frame_acquistion = our_node_map.attr(v)
+                except RuntimeWarning:
+                    f"Couldn't get node's method to work with {k, v}"
+            except LookupError as e:
+                print(f"key: {k} -> ERROR: {e} is not in map our_node_map")
+        '''
+        #our_node_map.getstate
+        #elf.camera.node
+        #print(f"Accesible parameters via imager acquirer's <remote_device> property are: \n {dir(self.camera)}")
+        #self.camera.AcquisitionFrameRateEnable.Value = True 
+        #print(getattr(self.camera, "AcquisitionFrameRateEnable"))
+        #print(getattr(our_node_map, "AcquisitionFrameRateEnable"))
+
+        #Use <nodemap>.AcquistionFrameRate.Value = False
+    def initialize_z_stack_settings(self, initial_safe_point: float = -7.650):
+            print("CHANGING HM")
+            self.Stage.send_command_normal("HM Z = 16.4") #set the under the hood home to lowest possible z_location for z_stacks
+            #time.sleep(10)
+            
+            print("CHANGING SL")
+            self.Stage.send_command_normal("SL Z = -9")
+            #time.sleep(10)
+            
+            print("CHANGING Z SPEED")
+            self.Stage.set_max_speed(axis = "Z", speed = 1)
+            #time.sleep(10)
+            
+            print("MOVING TO HOME")
+            self.Stage.send_command_normal("! Z") #move to the under the hood 'home' ; confirms empircally only moves z axis not x,y
+            #time.sleep(11)
+            self.Stage.wait_for_device(axis = "Z")
+            
+            print("CHANGING ORIGIN")
+            self.Stage.send_command_normal("ZERO")#set origin 
+            #time.sleep(10)
+            
+            print("MOVING TO TURRET)")
+            self.Stage.send_command_normal('MOVE T = 5')
+            #time.sleep(10)
+            
+            #self.Stage.wait_for_device(axis = "T")
+            
+            z_pos =  HSI_Scanner.Utils.metric_to_asi(single_mm= initial_safe_point) #testing purposes
+            self.Stage.move_stage(z =  z_pos)
+            self.Stage.wait_for_device(axis = "Z")
+            #time.sleep(10)
+            print("CHANGING ORIGIN 2nd time bc we send values now that are RELATIVE to the the median/<initial_safe_point>")
+            self.Stage.send_command_normal("ZERO")#set origin 
+            #time.sleep(10)
+            
+            #self.Stage.send_command_normal("ZERO") 
+            print(f'z position is: {self.Stage.get_position("Z")/10000}')
+
+    # ------------------------- #
+    # Helper Class
+    # ------------------------ #
 
     class Utils:
         
@@ -1018,20 +1173,48 @@ class HSI_Scanner:
         @staticmethod
         def metric_to_asi(
             single_mm: Optional[Union[int, float]] = None,
-            mm_iter: Optional[Tuple[Union[int, float], Union[int, float], Union[int, float]]] = None,
+            mm_iter: Optional[Tuple[Union[int, float], ...]] = None,
             asi_to_mm: bool = False
-        ) -> Union[int, Tuple[int, int, int]]:
-            """Convert mm to ASI units (tenths of microns) or back if `asi_to_mm` is True."""
+        ) -> Union[int, float, Tuple[int, ...], Tuple[float, ...]]:
+            """
+            Convert mm to ASI units (tenths of microns) or back if `asi_to_mm` is True.
+            - single_mm: single value in mm
+            - mm_iter: tuple of mm values
+            - Returns int or float for single value, tuple of int or float for multiple values
+            """
             asi_scalar = 10000 if not asi_to_mm else 1 / 10000
 
             if mm_iter is not None:
-                return tuple(int(x * asi_scalar) for x in mm_iter)
+                if asi_to_mm:
+                    return tuple(float(item) * asi_scalar for item in mm_iter)
+                else:
+                    return tuple(round(float(item) * asi_scalar) for item in mm_iter)
             elif single_mm is not None:
-                return int(single_mm * asi_scalar)
+                if asi_to_mm:
+                    return float(single_mm) * asi_scalar
+                else:
+                    return round(float(single_mm) * asi_scalar)
             else:
                 raise ValueError("Either 'single_mm' or 'mm_iter' must be provided.")
 
-# ------------------------- #
+        @staticmethod
+        def metric_to_asi_iters(values: Sequence[Union[int, float]], asi_to_mm: bool = False) -> Union[List[int], List[float], Tuple[int, ...], Tuple[float, ...]]:
+            """
+            Convert a list or tuple of mm values to ASI units.
+            Preserves input type: list -> list, tuple -> tuple.
+            Returns int or float depending on asi_to_mm.
+            """
+            if isinstance(values, tuple):
+                if asi_to_mm:
+                    return tuple(float(HSI_Scanner.Utils.metric_to_asi(single_mm=z, asi_to_mm=asi_to_mm)) for z in values)
+                else:
+                    return tuple(int(HSI_Scanner.Utils.metric_to_asi(single_mm=z, asi_to_mm=asi_to_mm)) for z in values)
+            else:  # list or any other Sequence
+                if asi_to_mm:
+                    return [float(HSI_Scanner.Utils.metric_to_asi(single_mm=z, asi_to_mm=asi_to_mm)) for z in values]
+                else:
+                    return [int(HSI_Scanner.Utils.metric_to_asi(single_mm=z, asi_to_mm=asi_to_mm)) for z in values]
+    # ------------------------- #
 # AUTOFOCUS METHODS ; unsure if need new class
 # ------------------------- #
         class Autofocus:
@@ -1130,17 +1313,17 @@ class HSI_Scanner:
                 # DEBUG prints
                 print(f"[DEBUG] Utils.tenengrad_score_mono: dtype={mono.dtype}, shape={mono.shape}")
                 if mono.dtype == np.uint8:
-                    f = mono.astype(np.float32) / 255.0
+                    f = mono.astype(np.float64) / 255.0
                     print("[DEBUG] normalize uint8 /255")
                 elif mono.dtype == np.uint16:
-                    f = mono.astype(np.float32) / 65535.0
+                    f = mono.astype(np.float64) / 65535.0
                     print("[DEBUG] normalize uint16 /65535")
                 else:
-                    f = mono.astype(np.float32)
+                    f = mono.astype(np.float64)
                     f = (f - f.min()) / (f.max() - f.min() + 1e-12)
                     print("[DEBUG] normalize dynamic range")
-                sx = cv2.Sobel(f, cv2.CV_32F, 1, 0, ksize=ksize)
-                sy = cv2.Sobel(f, cv2.CV_32F, 0, 1, ksize=ksize)
+                sx = cv2.Sobel(f, cv2.CV_64F, 1, 0, ksize=ksize)
+                sy = cv2.Sobel(f, cv2.CV_64F, 0, 1, ksize=ksize)
                 score = float(np.hypot(sx, sy).mean())
                 print(f"[DEBUG] tenengrad mean={score:.6f}")
                 return score
@@ -1426,35 +1609,63 @@ class HSI_Scanner:
     # ------------------------- #
     # Main scanning loop
     # ------------------------- #
-
+#MAKE DISABLE CAMERA ACQUISITION
     def pre_scan_check(
         self,
         rows,
         cols,
         x_distance_mm,
         y_distance_mm,
-        stage_speed,
+        x_stage_speed,
         save_folder,
         LED_power,
         bin_factors,
         _pause_between_grids: float = 1,
         custom_home_spot: bool = True,
         home_points: list | None = None,
-    ) -> bool:
+        user_custom_file_name: list | None = None,
+        z_stack_coords: list[float,] | None = None,
+        z_stage_speed: float = 1e-2 
+
+    ) -> None:
         """
         Pre-scan wrapper around the pushbroom scan.
-
+        
         This version mirrors the behavior of the old recursive run_pushbroom_scan:
         - If custom_home_spot=True and multiple home points are provided, we perform
         one full scan per home point.
         - If custom_home_spot=False, we treat (0,0,0) as the only home and scan once.
         """
+        if z_stack_coords is not None:
+        #Generate z_stack coordinates
+            self.initialize_z_stack_settings()
+            print("z_stack_coords:", z_stack_coords)
+            print("min/max:", min(z_stack_coords), max(z_stack_coords))
 
-        self.turn_on_light(percentage_power = LED_power)   # <--- Add this at start
+        variance = 0.0
+        '''
+        for z_coord in z_stack_coords:
+            z_coord = z_coord * 10000
+            self.Stage.move_stage(z = z_coord)     # <-- FIXED
+            self.Stage.wait_for_device()
+            time.sleep(3)
 
+            actual_z = self.Stage.get_position("Z") / 10000  # unit conversion once
+            z_coord = z_coord/10000
+            variance += (abs(z_coord) - abs(actual_z)) ** 2
+ 
+            print(
+                f"projected z: {z_coord:.6f}\t -- actual stage z: {actual_z:.6f}"
+            )
+
+        print(f"std dev = {math.sqrt(variance / len(z_stack_coords)):.6f} mm for n = {len(z_stack_coords)}")
+
+        '''
+        self.turn_on_light(percentage_power = LED_power)   
+        self.led_power = LED_power
         # If home_points not passed, initialize to a single default tuple
         # (same semantics as the old recursive version)
-        home_points_current = home_points if home_points else [(0, 0, 0)]  # List with a single tuple
+        home_points_current = home_points if home_points else [(0, 0, 0)]  
 
         # Baseline speeds
         self.Stage.set_max_speed('X', 1.5)
@@ -1497,7 +1708,35 @@ class HSI_Scanner:
             else:
                 #should add args to get_position
             '''
+            #z_stack_logic: Callable
+            #z_stack_logic = lambda _: [c for c in (z_stack_coords)] if z_stack_coords is not [0] else lambda _: None
+            #if z_stack_coords is not [0]:
+                
+           #     z_stack_logic =  lambda _: [c for c in (z_stack_coords)]
+            #else:
+            #    z_stack_logic = lambda _: None
+            use_z_stack: bool = (z_stack_coords != None)
+            z_values = z_stack_coords if use_z_stack else [0]
+            assert z_values is not None
+            
+    
+            print(f'our z values in mm are: {[z for z in z_values]}')
+            z_values = [HSI_Scanner.Utils.metric_to_asi(z) for z in z_values]
+            
+            print(f'our z values in 1/10th micron are: {z_values}')
+            last_z_val = z_values[len(z_values)-1]
 
+            '''from typing import Callable, Any
+
+                def z_stack_logic(fn: Callable[[float], Any]) -> list[Any]:
+                    result = []
+                    for c in z_values:
+                        result.append(fn(c))
+                    return result
+            '''
+            z_stack_logic: Callable[[Callable[[float], [Any]]], None]
+            z_stack_logic = lambda fn: [fn(c) for c in z_values]
+            
             # Anchor x0_asi, y0_asi at the *current* home
             time.sleep(1)
             x0_asi = self.Stage.get_position_trycasters('X')
@@ -1515,8 +1754,10 @@ class HSI_Scanner:
                 time.sleep(10)
             print("time given to manually focus")
 
+           
+            #self.Stage.move_stage(x=x_start)
             # Set X and Y stage speed and convert mm to ASI units
-            self.Stage.set_max_speed('X', stage_speed)
+            self.Stage.set_max_speed('X', x_stage_speed)
             #self.Stage.set_max_speed('Y', stage_speed)
             
             x_step: float = HSI_Scanner.Utils.metric_to_asi(single_mm=x_distance_mm)
@@ -1530,7 +1771,6 @@ class HSI_Scanner:
                 # Move Y to correct position for this row in real space (a → y)
                 y_start = (a * y_step) + y0_asi
                 self.Stage.set_max_speed('Y', 2) #set a second time for both modularity and seems to be issues if program is running for >24 hours - 36 hours with set speed?
-
                 self.Stage.move_stage(y=y_start)
                 self.Stage.wait_for_device()
                 time.sleep(1)
@@ -1547,12 +1787,14 @@ class HSI_Scanner:
                 else:
                     x_start = x0_asi + (cols) * x_step
                 
-                debug_var = self.Stage.set_max_speed('X', 0)
+                #debug_var = self.Stage.set_max_speed('X', 0)
                 #self.Stage.set_max_speed('X', 1.5) #speed should implicitly be 
+                
+                self.Stage.set_max_speed('X', x_stage_speed)
                 self.Stage.move_stage(x=x_start)
                 self.Stage.wait_for_device()
                 print("CHECKING IF THE CHANGE IN X SUPERGRID GOES AT PROPER SPEED")
-                self.Stage.set_max_speed('X', stage_speed)
+                
 
             #This should be logic for within subgrid; delta x movement 
                 for b in range(cols):
@@ -1562,30 +1804,42 @@ class HSI_Scanner:
                             # Attempt 1: real ASI-2000 position
                             x_real = self.Stage.get_position('X') / 10000.0
                             y_real = self.Stage.get_position('Y') / 10000.0
-
+                            #z_real = self.Stage.get_position('Z') / 10000.0
                         except Exception as asi_err:
                             try:
                                 # Attempt 2: calculated fallback from outer nested loop
                                 x_real = x_start 
                                 y_real = y_start
+                                #z_real = z_start
 
                             except Exception as calc_err:
                                 raise RuntimeError(
                                     "Neither ASI-2000 position query nor calculated fallback succeeded"
                                 ) from calc_err
 
-                            
-                        print(f"Starting tile (a={a}, b={b}) at (x={x_real:.4f}, y={y_real:.4f}) mm")
+                        z_stack_logic(lambda c: self.scan_tile(
+                                a, b, bin_factors, save_folder,
+                                delta_x=delta,
+                                custom_file_name = user_custom_file_name,
+                                expected_super_grid_home = home_points_current[0],
+                                actual_super_grid_home=(x_real, y_real),
+                                z_plane_to_scan = c,
+                                x_stage_speed = x_stage_speed,
+                                last_z_plane = last_z_val
+                                
+                            ))
+                                                    #return the stage to previous position unless it's the last Z plane of a z-stack
+                                                    #in which case go to the next x-y position... This is slightly more time inefficient
+                                                    #than doing an an entire xy plane scan then repeating for different heights
+                                                    #but maybe will make folder process easier 
+                        #print(c)
+                            #print(f"Starting tile (a={a}, b={b}) at (x={x_real:.4f}, y={y_real:.4f}) mm")
 
-                        self.scan_tile(
-                            a, b, bin_factors, save_folder,
-                            delta_x=delta,
-                            actual_super_grid_coords=(x_real, y_real)
-                        )
-                    #except Exception as e:
-                        #print(f"[WARN] tile (a={a}, b={b}) failed: {e}")
-                        #continue
-                # optional per-row cleanup
+                           
+                        #except Exception as e:
+                            #print(f"[WARN] tile (a={a}, b={b}) failed: {e}")
+                            #continue
+                    # optional per-row cleanup
                 gc.collect(0)  # young-generation GC; cheaper
                 time.sleep(_pause_between_grids)
 
@@ -1643,12 +1897,12 @@ class HSI_Scanner:
         self.turn_off_light()
         print("Scan complete. Light turned off.")
 
-      
-    def scan_tile(self, row, col, bin_factors, save_folder, delta_x: float,  home_points_for_naming=None, actual_super_grid_coords: tuple = ()):
+    def scan_tile(self, row, col, bin_factors, save_folder,  z_plane_to_scan: float, last_z_plane: float, delta_x: float, x_stage_speed: float,
+                  custom_file_name: str = "", expected_super_grid_home: tuple = (), actual_super_grid_home: tuple = (), ) -> None:
 
         """Scan a single tile at (row, col), grab frames, build cube, and save.
 
-
+        
         Notation:
         (a, b) = grid space indices = (row, col)
         (x, y, z) = stage real-space coordinates in mm
@@ -1657,6 +1911,12 @@ class HSI_Scanner:
         As of V8 automatically defaults to true if you want to scan a dish/well item in <Make_GUI()>. Was made like this that way there is exactly
         only 1 save folder and expected per <Scanner> instaniation. Harder for user to mess up previous files considering we also don't overwrite old files by default.
         """
+        print(f'Our plane to scan is {z_plane_to_scan}')
+        self.Stage.move_stage(z = z_plane_to_scan)
+        self.Stage.wait_for_device(axis = "Z")
+        cur_z_pos = self.Stage.get_position(axis = "Z")
+        cur_z_pos = HSI_Scanner.Utils.metric_to_asi(single_mm= cur_z_pos, asi_to_mm= True)
+        #HSI_Scanner.Utils.metric_to_asi_iters([cur_z_pos, z_plane_to_scan])
         
         frame_debug_type = "500"          # Placeholder variable for GUI-User or Private Logic logic
         grab_strategy_type = "OneByOne"   # Default grab strategy
@@ -1725,6 +1985,8 @@ class HSI_Scanner:
             DebugExceptions.MyAttributeError.custom_warning("_snapshot_event", o=self)
             _check_snapshot = lambda: None  # no-op if missing
 
+        if TIME_TO_MANUALLY_FOCUS:
+            time.sleep(5)
         # call safely
         _check_snapshot()
         
@@ -1738,7 +2000,7 @@ class HSI_Scanner:
 
     # --- Start grabbing with chosen strategy (unchanged) ---
         self.camera.StartGrabbing(grab_strategy)
-
+        
         try:
             while True:
                 # ---- stop when decelerating (your exact rule preserved) ----
@@ -1768,7 +2030,6 @@ class HSI_Scanner:
             
         timed_event = custom_timer.stop() #<-- for checking x_distance travel time should be around 8.2 seconds on 1/0.0625 mm/s * 0.51 mm distance
         _check_snapshot()
-
 
         if not isinstance(cube_frames, list):
             print("Cube_frames is either not a list or is uninitialized")
@@ -1822,7 +2083,7 @@ class HSI_Scanner:
 
         # Build raw-sensor pixel centers m (unbinned coords) from band indices
         m = HSI_Scanner._solve_pixel_from_band(
-            spectral_axis,
+            band_nums=spectral_axis,
             bin_factor=spectral_bin_factor,
             #off_set=device_y_offset_unbinned,  # unbinned device offset (Oy)
             reversed_bc_pikaXC2=False,                    # XC2: lower λ at higher pixel index
@@ -1842,63 +2103,69 @@ class HSI_Scanner:
                 break
         print(f"[DEBUG] Calculated wavelengths shape: {wavelengths.shape if hasattr(wavelengths, 'shape') else type(wavelengths)}")
         print(f'wavelengths nm = {wavelengths}')
-
-        meta_filename = f"cube_y{row}_x{col}_meta.json"
-        data_filename = f"cube_y{row}_x{col}.npy"
-
-        # Convert actual_cords to ASI units string if present
-        ''''''
-        super_x = actual_super_grid_coords[0]
-        super_y = actual_super_grid_coords[1]
-        super_x = str(super_x)
-        super_y = str(super_y)
-        '''
-        actual_super_grid_coords_string = (
-            '_'.join(str(x) for x in actual_super_grid_coords)
-            if actual_super_grid_coords and isinstance(actual_super_grid_coords, tuple)
-            else ""
-        )
-     
         
-        # Make sure `expected_super_grid_cord` is defined and converted to string
-        expected_super_grid_coords = str(expected_super_grid_cord)
-        
-    
-        # Compose the logic string (REMOVE extra spaces in keys like "actual_ ")
-        main_file_logic = f"actual_{actual_super_grid_coords_string}_expected_{expected_super_grid_coords}_"
-        '''
+                
+            # --- Naming the file --- #
+        meta_file_type = '.json'
+        data_file_type = '.npy'
 
-         # --- Derive expected super grid coords ---
-        expected_super_grid_coords = None
-        if home_points_for_naming and isinstance(home_points_for_naming, (list, tuple)) and home_points_for_naming:
-            expected_super_grid_coords = home_points_for_naming[0]
+        meta_file_name = f'meta{meta_file_type}'
+        data_file_name = f'data{data_file_type}'
 
-        # --- Convert if exists ---
-        if expected_super_grid_coords and any(expected_super_grid_coords):
-            try:
-                expected_super_grid_coords = HSI_Scanner.Utils.metric_to_asi(
-                    mm_iter=expected_super_grid_coords,
-                    asi_to_mm=True
-                )
-            except Exception as e:
-                print(f"[WARN] Failed to convert expected_super_grid_coords: {e}")
-                expected_super_grid_coords = None
+        del meta_file_type, data_file_type
 
-        # --- Stringify (after conversion or fallback) ---
-        if expected_super_grid_coords and any(expected_super_grid_coords):
-            expected_super_grid_coords = "_".join(f"{v:.3f}" for v in expected_super_grid_coords)
+        # --- Priority naming ---
+        # 1. user custom name
+        # 2. default: <actual_coords>_<expected_coords>_<subgrid>
+        #    (ignore z coordinate for now to avoid filename spam)
+
+        if isinstance(custom_file_name, str) and custom_file_name.strip():
+            meta_file_name = f"{custom_file_name}_{meta_file_name}"
+            data_file_name = f"{custom_file_name}_{data_file_name}"
+
         else:
-            expected_super_grid_coords = "none"
+            sub_grid_cur = f"cur_z_pos_{cur_z_pos}_expected_z_position_{z_plane_to_scan/10}_um_sub_grid_row_{row}_col_{col}"
 
-        main_file_logic = f"actual_{super_x}_{super_y}_expected_{expected_super_grid_coords}_"
+            # --- Actual super grid coords (x, y only) ---
+            super_x = actual_super_grid_home[0]
+            super_y = actual_super_grid_home[1]
 
-        # Update filenames
-        meta_filename = main_file_logic + meta_filename
-        data_filename = main_file_logic + data_filename
+            # --- Expected super grid coords ---
+            print(f'Expected super_grid_coords are: {expected_super_grid_home}')
+            expected_super_grid_coords_str = "none"
+            if expected_super_grid_home is not None and any(expected_super_grid_home):
+                try:
+                    '''
+                    expected_super_grid_coords = HSI_Scanner.Utils.metric_to_asi(
+                        mm_iter=expected_super_grid_home,
+                        asi_to_mm=False
+                    )
+                    '''
+                    expected_super_grid_coords_str = "_".join(
+                        f"{v:.3f}" for v in expected_super_grid_coords_str[:2]
+                    )
+                except Exception as e:
+                    print(f"[WARN] Failed to convert expected_super_grid_coords: {e}")
+
+            # --- Build filename stem ---
+            super_grid_total = (
+                f"actual_coords_x{super_x}_y{super_y}_"
+                f"expected_{expected_super_grid_coords_str}"
+            )
+
+            total_grid = f"{super_grid_total}_{sub_grid_cur}"
+
+            meta_file_name = f"{total_grid}_{meta_file_name}"
+            data_file_name = f"{total_grid}_{data_file_name}"
+
+        # --- Final filenames ---
+        meta_filename = meta_file_name
+        data_filename = data_file_name
 
         # Debug prints
         print(f"[DEBUG] Default data file name for saving: {data_filename}")
         print(f"[DEBUG] Default meta file name for saving: {meta_filename}")
+
 
         # Set the GUI meta file
         Make_GUI.set_meta_file(
@@ -1909,8 +2176,22 @@ class HSI_Scanner:
         print(f"[DEBUG] Set meta file to: {Make_GUI.meta_file}")
 
         band_wavelength = True
-        metafile_printout = list(zip(spectral_axis.tolist(), wavelengths.tolist())) if band_wavelength else wavelengths.tolist()
-        Make_GUI._write_to_data_metafile(wavelength_range_nm = metafile_printout)
+        wavelength_range_nm  = list(zip(spectral_axis.tolist(), wavelengths.tolist())) if band_wavelength else wavelengths.tolist()
+        
+        #print(np.dtype(binned_cube))
+        #metafile_printout = list(zip(spectral_axis.tolist(), wavelengths.tolist())) if band_wavelength else wavelengths.tolist()
+        Make_GUI._write_to_data_metafile(f'data dims: {binned_cube.shape}', f'data dims format: (spectral, spatial, line)', #need to probably create custom type here to not hardcode the solution
+                                         #f'cube dims data type: {[data.dtype for data in cube.shape]}',
+                                         f'binned_cube obj type: {type(binned_cube)}', f'binned_cube dims container type(s): {[binned_cube.dtype]}',
+                                         f'gain factor: {self.gain}', f'exposure ms: {self.exposure}', 
+                                         f'data type of intensity values in dims container: {self.memory_type}', 
+                                         '', 
+                                         f'delta_x mm: {HSI_Scanner.Utils.metric_to_asi(delta_x, asi_to_mm= True)}', 
+                                         f'actual_super_grid_home: {actual_super_grid_home}',f'row: {row}', f'col: {col}', 
+                                         f'relative z_plane_to_scan μm: {z_plane_to_scan / 10}', f'distance between z-planes in mm: {(Make_GUI.distance_between_z_stack)}' , 
+                                         f'number_of_z_stacks: {Make_GUI.number_of_z_stacks}', 
+                                         '', 
+                                         f'led_power: {self.led_power}', f'bin_factors (spec,spat,line): {bin_factors}', f'band/nm: {wavelength_range_nm}')
 
         save_path = os.path.join(save_folder, data_filename)
         save_path = os.path.normpath(save_path)
@@ -1927,14 +2208,14 @@ class HSI_Scanner:
         del binned_cube, cube, cube_frames, flat_values, spectral_axis, wavelengths
         gc.collect()
         
-        #to_delete: Optional[Tuple[str, ...]] = ("binned_cube", "cube", "img", "cube_frames", "flat_values")
-                            
-        #custom_debug_exceptions.delete_global_names(to_delete)
-        #DebugExceptions.delete_global_names(*to_delete)
+        if z_plane_to_scan is not last_z_plane:
+             self.Stage.set_max_speed('X', 1.5)
+             self.Stage.move_stage(x= -1 * delta_x, relative=True)
+             self.Stage.wait_for_device(axis = "X")
+             self.Stage.set_max_speed('X', x_stage_speed)
+             
         
-    
-
-    ########SETTING ROI##########
+    #``````#######SETTING ROI#########```````#
             ############## '''
     #should be static and psuedo-private/protected because should be set ON SPECIFIC CAMERA OF INTEREST and should not be set by user or accessible
 
@@ -2488,7 +2769,7 @@ class HSI_Scanner:
         )
         exposure_us = round(exposure_us, 2)
         self.camera.ExposureTime.SetValue(exposure_us)
-
+        self.exposure = exposure_us
         print(f"[GUI] Exposure set to: {exposure_us:.0f} µs (requested {initial_exposure_set_ms:g} ms)")
         print(f"[Exposure set via pypylon]: {self.camera.ExposureTime.Value} µs")
         return exposure_us
@@ -2581,8 +2862,9 @@ class Make_GUI:
     # class-level state for an external "data meta" file (set via set_meta_file)
     meta_file: str = ""
     cur_dir: str = ""   #class level variable that saves based on instance variable found init --> should be update to date at this point hence cur_dir
-    
-
+    distance_between_z_stack: float | None = None
+    number_of_z_stacks: int | None = None
+     
     def __init__(self):
         # preload the save/GUI structure before the actual scan execution
         cur_file, save_dir = self._format_meta_data_and_save_structure()
@@ -2622,7 +2904,7 @@ class Make_GUI:
             f.write("\n")
 
     @classmethod
-    def _write_to_data_metafile(cls, **kwargs) -> None:
+    def _write_to_data_metafile(cls, *args) -> None:
         """
         Append a JSON object (pretty-printed) to the class-level data meta file.
         Call set_meta_file(...) first.
@@ -2630,7 +2912,7 @@ class Make_GUI:
         if not cls.meta_file:
             raise ValueError("Meta file path not set. Call set_meta_file() first.")
         with open(cls.meta_file, "a", encoding="utf-8") as f:
-            json.dump(kwargs, f, ensure_ascii=False, indent=2)
+            json.dump(args, f, ensure_ascii=False, indent=2)
             f.write("\n")
 
     # ── core setup ──────────────────────────────────────────────────────
@@ -2758,7 +3040,102 @@ class Make_GUI:
         d = Make_GUI._json_load_or_none(p)
         return d if isinstance(d, dict) else {}
 
-    
+    @staticmethod
+    def generate_z_stack_homes(
+            use_z_stack: bool,
+            z_stack_dict,
+    ) -> Optional[list[float]] | None:
+
+            """
+            Builds Z positions centered on `median_z`, spaced by `distance_per_plane`,
+            and guarantees all positions stay within [z_min, z_max].
+
+            If the requested span cannot fit inside the allowed window, raises ValueError.
+
+            """
+            #num_planes, distance_per_plane; if given even number use truncated should split into even number above and below axis
+                    #so if num_planes = 40; no median on 0 just a mirror
+                    #start with negative z then go to positive z; reason being negative z is where the sample could hit objective lense
+                        # ---> want that while the user is nearby on off-chance of that happening
+                            # --> will make a few safety checks incase user doesn't have proper firmware that prevents sample and stage collision
+                    # 40/2 = z_stack_per_dim, closest_distance: float = (z_stack_per_dim * distance_per_plane * -1)
+
+                                #safety will just handle plates and **NOT WELLS** for now;
+                        #all mags will have a roughly maximum distance that can be closed in on the closer (objective) side of the z_stack; measured empiricaly with a slide of ~ give empirical absolute measurements of a 1.15 mm slide
+                            #upon investigation it looks like the lowest the ASI 2000 stage can move from the highest position is 15.89290 mm or 15.8 + .71? --> 16.52 --> use 16.4 which is more than Max Lim and Min Lim stated using "I Z" command
+                            #set home to --> +15.8 mm away via "HM Z = 10" at start of every run; now turret is safely at bottom
+                            #move z to roughly safe starting zone --> can just get
+                            # --> 10x = NLT <-6.533                    ~ -7.87 mm
+                            # --> 20x = NLT <-                         ~ -8.13 mm is in focus for 20x
+                            # --> 40x = NLT <-                         ~ -8.13 mm
+                            # mm is in focus for 40x  --> therefore put SL at -9 we cant have a z-stack destroy the same so start at -7.5 --> -8.5 ; range works for both 10x and 20x too
+
+            if (not use_z_stack) or (z_stack_dict is None): #handle cases since .metadata() call can return "None" and put an empty dictionary 
+                                                        #in Params dictionary
+                return None
+            else:
+
+                def _generate_z_stack_homes(
+                    magnification: str = "10x",
+                    plate_or_wells: str = "plate",
+                    *,
+                    median_z: float = -8.3650, # units are mm
+                    z_min: float = -8.900, #no longer safe for thin sample objective
+                    z_max: float = -6.900,
+                    normalize_to_median: bool = True
+                ) -> Optional[list[float]]:
+
+                    # STRICT → crashes if caller dict is wrong; too abstracted here if it's wrong it should be chanegd based on
+                    # some local hard-code string or potentially from some secondary header file
+                    z_distance: float = float(z_stack_dict["z_distance"])
+                    num_z_slices: int = int(z_stack_dict.get("num_z_slices"))
+
+                    Make_GUI.distance_between_z_stack = z_distance
+                    Make_GUI.number_of_z_stacks = num_z_slices
+                    
+                    if z_min > z_max:
+                        z_min, z_max = z_max, z_min
+
+                    if num_z_slices <= 0:
+                        num_z_slices = 1
+
+                    if z_distance <= 0:
+                        z_distance = 0.0
+
+                    center_index = (num_z_slices - 1) / 2.0
+
+                    allowed_span = z_max - z_min
+                    if num_z_slices > 1:
+                        requested_span = (num_z_slices - 1) * z_distance
+                        if requested_span > allowed_span and allowed_span > 0:
+                            z_distance = allowed_span / (num_z_slices - 1)
+
+                    offsets = [(i - center_index) * z_distance for i in range(num_z_slices)]
+                    coords = [median_z + off for off in offsets]
+
+                    stack_min = min(coords)
+                    stack_max = max(coords)
+
+                    shift = 0.0
+                    if stack_min < z_min:
+                        shift = z_min - stack_min
+                    if (stack_max + shift) > z_max:
+                        shift -= (stack_max + shift) - z_max
+
+                    if shift != 0.0:
+                        coords = [z + shift for z in coords]
+
+                    if min(coords) < z_min:
+                        coords = [max(z, z_min) for z in coords]
+                    if max(coords) > z_max:
+                        coords = [min(z, z_max) for z in coords]
+
+                    if normalize_to_median:
+                        norm = coords[int(center_index)] #truncate this assume left bias
+                        coords = [norm - z for z in coords]
+                    return coords
+
+                return _generate_z_stack_homes()
     # ── Real life scan container type utils ──────────────────────────────────────────────────────
     @staticmethod
     def _plate_measurements(which_well: str):
@@ -2802,6 +3179,18 @@ class Make_GUI:
                 "rows": 4, #8
                 "cols": 6  #12
             }
+        if which_well == "use_magnet": # data found here: https://www.tpp.ch/page/produkte/09_zellkultur_testplatte.php used TPP plate 92424
+            #recommended to do 4x4 - 6x6 for fluorescence to be safe or 2x2 brightfield
+
+            return {
+                "x_start_mm": 0.0,
+                "y_start_mm": 0.0,
+                "z_start_mm": 0.0,
+                "dx_mm": 0,
+                "dy_mm": 0,
+                "rows": 0, 
+                "cols": 0  
+            }
             
         else:
             raise ValueError(f"Unknown well type: {which_well}")
@@ -2814,7 +3203,8 @@ class Make_GUI:
     ) -> List[Tuple[float, float, float]]:
         """
         Generate 12-well (3×4) plate home points in snake (S-pattern) order.
-        Returns: list of (x, y, z) in mm or ASI units (or both if flag is set)
+        Returns: list of (x, y, z) in mm or ASI units (or both if flag is set).
+        Relative to user set zeroing-point.
         """
         # Get plate measurements
         params = Make_GUI._plate_measurements(which_well)
@@ -2981,8 +3371,118 @@ class Make_GUI:
         except Exception as e:
             print(f"[load_defaults] schema='{schema}' error: {e!r}")
             return {}
-    
-    def show_advanced_gui(self) ->  np.ndarray | None:
+        
+    def _show_advanced_zstack_gui(
+    self,
+    schema: str,
+    null_z_speed: float = 0.0,
+    null_z_delta_dist: float = 0.0,
+    null_z_num_slice: int = 0
+) -> dict[str, float | int] | None:
+        '''A z-stack is a bunch of scans at given intervaled heights relative to the optical axis. The use case is for focusing; there's generally
+        one distance the stage must be to be at the right focal distance for kohler illumination
+        Method to control parameters for Z-stack:
+        z_speed -- mm/s the stage should travel in the optical plane axis <float>
+        z_delta_dist -- mm the stage will travel per step <float>
+        z_num_slice -- number of slices to take. 0 slices is equivalent to not doing a z-stack <int>
+
+        <enable_cell_editing> = True is deprecated or not properly implemented in my clone of pysimplegui ; https://docs.pysimplegui.com/en/latest/call_reference/tkinter/elements/table/
+        # therefore need to implement manually it seems'''
+
+        #more intuitive a structure than a <dict[str, list[float | int ]]> type hint
+        print("go into advancedzstack func")
+        def_z_stack_behavior = self._load_defaults(schema=schema)
+        #class _ZStackParams(TypedDict):
+    #     z_speed: float
+    #     z_delta_dist: float
+        #    z_num_slice: int
+        print(f'z stack default values are {def_z_stack_behavior.items()}\n')
+        # keep a live copy that matches what the table shows
+
+        z_stack_behavior: dict[str, float | int] = {
+            "z_stage_speed": float(def_z_stack_behavior["z_stage_speed"]),
+            "z_distance": float(def_z_stack_behavior["z_distance"]),
+            "num_z_slices": int(def_z_stack_behavior["num_z_slices"]),
+        }
+
+        def _apply_defaults_to_dict(d: dict) -> None:
+            for key, value in d.items():
+                if key in z_stack_window.AllKeysDict:
+                    z_stack_window[key].update(value)
+            #cast(_ZStackParams )
+
+        z_stack_layout = [
+            [
+                sg.Table(
+                    values=[[z_stack_behavior["z_stage_speed"], z_stack_behavior["z_distance"], z_stack_behavior["num_z_slices"]]],
+                    headings=["z_stage_speed(mm/s)", "z_distance (mm)", "num_z_slices (#)"],  #should currently match the KEY_* from SCAN_METADATA_HEADER.py file without explicitly referencing
+                    auto_size_columns=True,
+                    key="z_stack",
+                    metadata={"kind": "z_stack"},
+                    alternating_row_color="light yellow",#alternating_row_color="lightyellow",
+                    bind_return_key=True,
+                    justification="left",
+                    text_color = "black",
+                    visible = True
+                )
+            ],
+            [sg.Button("Change values"), sg.Button("Submit values"), sg.Button("Close")],
+        ]
+
+        z_stack_window = sg.Window(
+            "HSI Scanner z_stack_parameters",
+            z_stack_layout,
+            use_default_focus=False,
+            keep_on_top=True,
+            modal=True,
+            finalize=True,
+        )
+
+        #z_stack_window.open()
+        print("go to z_stack open")
+        while True:
+            event, values = z_stack_window.read()
+
+            if event in (sg.WIN_CLOSED, "Close"):
+                z_stack_window.close()
+                return z_stack_behavior
+
+            elif event == "Change values":
+                popup_layout = [
+                    [sg.Text("speed"), sg.Input((z_stack_behavior["z_stage_speed"]), key="z_speed")], #dynamic param line working here though
+                    [sg.Text("delta_dist"), sg.Input((z_stack_behavior["z_distance"]), key="z_delta_dist")],
+                    [sg.Text("num_slice"), sg.Input((z_stack_behavior["num_z_slices"]), key="z_num_slice")],
+                    [sg.Button("OK"), sg.Button("Cancel")],
+                ]
+
+                popup = sg.Window("Edit Z-Stack Values", popup_layout, modal=True, keep_on_top=True, finalize=True)
+                ev, vals = popup.read()
+                popup.close()
+
+                if ev == "OK":
+                    try:
+                        z_speed = float(vals["z_speed"])
+                        z_delta_dist = float(vals["z_delta_dist"])
+                        z_num_slice = int(float(vals["z_num_slice"]))
+                    except Exception:
+                        sg.popup_error("Invalid numeric input")
+                        continue
+
+                    z_stack_behavior["z_stage_speed"] = z_speed
+                    z_stack_behavior["z_distance"] = z_delta_dist
+                    z_stack_behavior["num_z_slices"] = z_num_slice
+
+                    z_stack_window["z_stack"].update(
+                        values=[[z_speed, z_delta_dist, z_num_slice]]
+                    )
+
+            elif event == "Submit values":
+                z_stack_window.close()
+                print(f'Z-stack params passed back to man GUI are: {z_stack_behavior}')
+                return z_stack_behavior
+
+                
+    def _show_advanced_correction_gui(self) ->  np.ndarray | None:
         _frame_corrections = {}
         _default_frames = 30
         layout = [
@@ -3019,9 +3519,7 @@ class Make_GUI:
         ]
 
         win = sg.Window("Advanced Settings", layout, modal=True, keep_on_top=True)
-
         while True:
-
             e, v = win.read()
             if e in (sg.WIN_CLOSED, "Close"):
                 break
@@ -3043,9 +3541,64 @@ class Make_GUI:
                     print("No cube type selected.")
                 break
             
-            
         win.close()
-    
+
+    def _show_advanced_customfile_gui(self) -> Optional[List[str | None]]:
+        '''Basic multiline box for <users_custom_file_name> input. Returns list of string values to be used per tile in the <scan_tile()> method,
+        The strings should already be parsed before returning to main window. The file names should be saved to a instance field because if the scan
+        runs again the user SHOULDN'T default to the same names as an extra safeguard against data overriding. Seems unlikely they would run again without
+        making a new folder if doing a replicant.
+
+        Make sure user can't have this window open while having main window closed; would create big bugs.🐛. Window closes after 600 seconds too'''
+
+        secondary_layout = [
+            [sg.Text("Enter custom file   step separated by a comma", size=(60, 1))],
+            [sg.Multiline(
+                autoscroll_only_at_bottom=False,
+                key='user_custom_file_name',
+                write_only=False,
+                size=(60, 10),
+                reroute_cprint=True,
+                rstrip=True,
+                enable_events=True,
+                do_not_clear=True,
+                enter_submits=True,
+                sbar_relief=sg.RELIEF_SUNKEN,
+                metadata=list()
+            )],
+        ]
+
+        window = sg.Window(
+            'Enter custom file name separated by a comma',
+            secondary_layout,
+            font=("Source Code Pro", 18, "bold"),
+            auto_close=True,
+            auto_close_duration=600,
+            alpha_channel=0.9,
+            use_default_focus=False,
+            keep_on_top=True,
+            finalize=True
+        )
+
+        # IMPORTANT: without this, your Multiline may never receive keypresses,
+        # so enable_events / enter_submits won't fire and values can look empty.
+        window['user_custom_file_name'].set_focus()
+
+        while True:
+            event, values = window.read(timeout=100)  # was 1; too fast & spams timeouts
+
+            if event in (sg.WIN_CLOSED, "Exit"):
+                break
+
+            if event == sg.TIMEOUT_EVENT:
+                continue  # don't spam-print empty/timeout reads
+
+            # Only prints when an actual event occurs (keypress / Enter)
+            print("event:", event)
+            print(values.get('user_custom_file_name'))
+
+        window.close()
+            
     def show_gui(self):
         print(f"[GUI] Showing GUI with default_folder: {self.default_folder}, previous_user_folder: {self.previous_user_folder}")
         
@@ -3057,8 +3610,14 @@ class Make_GUI:
             
             [sg.Text("Wells/Dish or Plate sample?"),
             sg.Radio("Plate", "MODE", key="plate_sample", default=True, metadata=bool),
-            sg.Radio("Wells/Dish", "MODE", key="wells_sample", default=False, metadata=bool)],
-
+            sg.Radio("Wells/Helmhotlz Coils with Plate", "MODE", key="wells_or_coil_sample", default=False, metadata=bool)],
+            [sg.Text("Use Z-Stack per Cube?", key = "z_stack_values", metadata = {}), #used to update window if user uses z_stack radio
+            sg.Radio("Yes", "Z_stack", key = "z_stack_yes", default = False, metadata = bool,  enable_events = True, ),
+            sg.Radio ("No", "Z_stack", key = "z_stack_no", default = True, metadata = bool,  enable_events = True, ),
+            sg.Text("", key = "z_stack_vals", s = (1,1), visible = False, metadata = None, enable_events = True), #null button to hold values from z-stack sg.Radio results
+             
+             ],
+            #sg.Radio("Use Z_stack", )
             [sg.HorizontalSeparator(color="#04D6D6", key="sep_top1", pad=10)], 
             [sg.HorizontalSeparator(color="#00CCCC", key="sep_top2", pad=10)],
 
@@ -3085,8 +3644,7 @@ class Make_GUI:
                         [sg.Text("Y distance (mm):"),
                         sg.InputText("0.938", key="y_distance", enable_events=True, metadata=float)],
                         [sg.Text("Stage speed (mm/s):"),
-                        sg.InputText("0.0623", key="stage_speed", enable_events=True, metadata=float)],
-
+                        sg.InputText("0.0623", key="x_stage_speed", enable_events=True, metadata=float)],
                         [sg.Text("Set ASI MS-2000 temporary movement params",
                                 tooltip="Scan may break due to too many lines if not custom option"),
                         sg.Radio("Use our Custom Ones", "ASI_MODE", key="custom_asi",
@@ -3113,12 +3671,11 @@ class Make_GUI:
                     [sg.Text("Line bin:"), sg.InputText("1", key="line_bin", metadata=int)],
 
                     [sg.Text("Exposure Time (ms):"), sg.InputText("16.33", key="exposure_time", metadata=float)],
-                    [sg.Text("Gain (dB):"), sg.InputText("20", key="gain", metadata=float)],
+                    [sg.Text("Gain (dB):"), sg.InputText("20", key="gain", 
+                                                         tooltip="Not actually gain but probably gain factor" + "\t" + "dB = 10*logbase10(gain_factor / data)", 
+                                                         metadata=float)],
                     [sg.Button("Set Correction Cubes")],
 
-                    
-
-                    [sg.Button("Start Scan"), sg.Button("Cancel")]
                     ],
                     title_location= sg.TITLE_LOCATION_TOP,
                     border_width=4,
@@ -3133,6 +3690,7 @@ class Make_GUI:
                         sg.InputText(str(self.previous_user_folder), key="save_folder", metadata=str,
                         tooltip=f'default_folder_path is {self.default_folder}'),
                     sg.FolderBrowse(initial_folder=str(self.previous_user_folder or self.default_folder))],
+                    [sg.Button("Make Custom File Names")],
                     
                     [sg.Text("Brightfield LED power value")],
                     [sg.Slider((0,99), default_value = 99, orientation = "horizontal", resolution = 1, enable_events = True, 
@@ -3141,11 +3699,22 @@ class Make_GUI:
                                 ]
                         )
                 ],
+                [sg.HorizontalSeparator(color="#00CCCC", key="sep_mid1", pad=10)], 
+                [sg.HorizontalSeparator(color="#04D6D6", key="sep_mid2", pad=10)], 
+                
+                [sg.Button("Start Scan", button_color = ("black on white"), font = ("Input", 16, "bold")), 
+                 sg.Button("Cancel", button_color = ("black on white"), font = ("Input", 16, "bold"))],
         ]
 
-        window = sg.Window("HSI Scanner", main_layout, use_default_focus=False, keep_on_top=True)
-        window.read(timeout=0)  # “prime” the window
+        '''Typing for windows.read() here is weird: looks like;
+        (Type: <Any, dict[Any, Any]>
+        where ``window[0]`` is usually a <str> specified from ``key`` param in the element creation,
+        and dict is that <str> used in {window[0], value} The value is type <Any> but depends on 
+        The key param is extremely confusing'''
+        
+        window = sg.Window("HSI Scanner", main_layout, use_default_focus=False, keep_on_top=True, finalize=True)
 
+        #First loading of the window
         current_defaults = self._load_defaults("bright")
         binding_map = self._build_binding_map(window, current_defaults, self.GLOBAL_FIELD_MAP)
         self._apply_defaults_using_map(window, current_defaults, binding_map)
@@ -3156,8 +3725,11 @@ class Make_GUI:
         "debug_yes": "debug_yes",
         "plate_sample": "plate_sample",
         "well_sample": "well_sample",
+        #"z_stack": "z_stack_yes" #deviation from others here because we want to initalize values only when radio button is hit do we assume the user wants a z_stack
+        #and the ability to modify the values for it ∴ shouldnt be in default_temp dict
         }
 
+        
         while True:
             event, values = window.read()
             if event in (sg.WIN_CLOSED, "Cancel"):
@@ -3165,11 +3737,49 @@ class Make_GUI:
                 print("Closing window...")
                 sys.exit(0)
 
+            #if event in 
+            #handlers = {"z_stack_yes": handle_yes, }
+            #subkey, metadata = [subkey for subkey, metadata in values.items if "z_stack" in window]
+            #if event in ("z_stack_yes", "z_stack_no"):
+            if event == ("z_stack_yes"):
+                z_stack_params = None
+                try:
+                    print("event search worked")
+                    z_stack_params = self._show_advanced_zstack_gui("z_stack") #need to implement header file; unsure of exact implementation
+                    assert z_stack_params is not None
+                    #print(dir(window["z_stack_vals"])\n\n)
+                    #print(window["z_stack_vals"].__dict__)
+                    window["z_stack_vals"].metadata = z_stack_params
+                    print(f'new metadata val for z-stack is {window["z_stack_vals"].metadata }')
+                    changed_val = window["z_stack_yes"]
+                    print(f'changed items are {changed_val.items()}')
+                
+                except:
+                    LookupError(f"Metadata attribute of key for {event} was changed")
+                    
+                '''
+                **FAULT IMPLEMENTATION BC IF THE DEFAULT BEHAVIOR FOR THE RADIO INVERTS; WE WILL NEVER OPEN WINDOW AS THE <METADATA> ATTRIBUTE'S VALUE IS <DEFAULT> PARAM
+                two_element_radio = window["z_stack_yes"] #window["Z_stack"]
+                radio_truthy = getattr(two_element_radio, "metadata", None) #3rd param is option to return if value doesn't exist
+                try:
+                    if radio_truthy is True:
+                        self.show_advanced_zstack_gui()
+                        continue
+                #for key,val in values.items()
+                '''    
+                #key = [key for key, metadata in values.items if "z_stack" in window]:
+                #   continue
+         
             if event == "Set Correction Cubes":
-                self.show_advanced_gui()
-                continue  # nothing else to do for this event
-
-            # Map only schema-selection buttons; ignore others like "Start Scan"
+                self._show_advanced_correction_gui()
+                continue 
+            
+            if event == "Make Custom File Names":
+                print("opening custom file multiline")
+                self._show_advanced_customfile_gui()
+                continue
+            
+            # Map only schema-selection buttons that will change values in our final dictionary which will instaniate when this window closes; ignore others like "Start Scan"
             schema = temp_dictionary.get(event)
             if schema:
                 current_defaults = self._load_defaults(schema)
@@ -3177,6 +3787,7 @@ class Make_GUI:
                 self._apply_defaults_using_map(window, current_defaults, binding_map)
                 print(f"[GUI] Changing parameters to {schema.upper()} using {current_defaults}")
                 continue
+            #Z_STACK WINDOW IS WORKING AND METADATA UPDATED CHECK IF THIS INTEGRATES THOUGH ^^
 
     # ...handle other events like "Start Scan" here...
 
@@ -3193,11 +3804,13 @@ class Make_GUI:
                         except Exception:
                             sg.popup_error(f"Invalid value for {key}: {val}")
                             raise
-
+                        
+                    params["z_stack_vals"] = window["z_stack_vals"].metadata #work around to structure although not ideal should
+                                                                        #probably just assign to a null elements <value> instead of metadata
+                                                                       #to keep the type casting consistent
                     print(f"[GUI] Params after casting: {params}")
                     
                     '''
-
                     def _fallback(v, default):
                         return default if (v is None or (isinstance(v, str) and not v.strip())) else v
 
@@ -3229,39 +3842,48 @@ class Make_GUI:
         cam = HSI_Scanner.default_camera
         pylon.GrabStrategy_LatestImageOnly
     '''    
-        
-        
-    def run_scan(self):
 
+    def start_scan_from_gui(self):
+        
         if not self.params:
-            print("[RUN] No params set. Run show_gui() first.")
-            return
+            print("[RUN] No params set. Need to have run show_gui() first.")
+            assert False
 
         params = self.params
 
-        
         # Scanner debug logic
         global Scanner
         Scanner.debug_frames = params["debug_yes"]
 
-        # \\\\\ Scanner run logic /////
+        # \\\\\ Handle any path generation, camera settings, and other before the real scanning login in 'x'-axis direction /////
         exposure_time = HSI_Scanner.Utils.safe_num(params["exposure_time"])
         gain = HSI_Scanner.Utils.safe_num(params["gain"])
         Scanner.set_exposure_from_gui(exposure_time)
         Scanner.set_gain_from_gui(gain)
         
-        use_wells = bool(params.get("wells_sample", True))
+        use_z_stack = bool(params.get("z_stack_yes", True)) #same key as <main_layout> z_stack radio key
+        use_wells = bool(params.get("wells_or_coil_sample", True))
+        
+        print(f'params.get("z_stack_vals") is {params.get("z_stack_vals")} and use_z_stack is {use_z_stack}')
+        z_stack_homes = Make_GUI.generate_z_stack_homes(use_z_stack = use_z_stack, z_stack_dict= params.get("z_stack_vals")) #either None or list of floats
+        
         if use_wells:
             # Pass the function, do NOT call it here
             generated_home_points = Make_GUI.generate_well_snake(
-                which_well = "4_by_6_wells",
+                which_well = "3_by_4_wells",
                 to_asi = HSI_Scanner.Utils.metric_to_asi, 
                 both_asi_and_mm=True
             )
             custom_home_spot = True
+            
+            #if use_z_stack:
+                #generated_home_points = [(0, 0, 0)] #GENERATE Z-STACK FUNC 
+                #custom_home_spot = False
+              #  print(params["z_stack"])
+                
         else:
             # Plate mode: no custom homes, start at (0,0,0)
-            generated_home_points = [(0, 0, 0)]
+            generated_home_points = [(0, 0, 0)] 
             custom_home_spot = False
 
         user_bin_factors = (
@@ -3276,12 +3898,13 @@ class Make_GUI:
             params["cols"],
             params["x_distance"],
             params["y_distance"],
-            params["stage_speed"],
+            params["x_stage_speed"],
             params["save_folder"],
             params["LED_power"],
             bin_factors = user_bin_factors,
             custom_home_spot = custom_home_spot,
-            home_points = generated_home_points
+            home_points = generated_home_points,
+            z_stack_coords= z_stack_homes
         )
         sg.popup("Scan complete!")
 
@@ -3511,7 +4134,7 @@ if __name__ == "__main__":
 
         Scanner = HSI_Scanner(camera_index="acA1920-155um", alias_MS2k_stage=Stage)
 
-        Gui.run_scan()
+        Gui.start_scan_from_gui()
 
         Stage.close()
         del Stage
@@ -3542,12 +4165,21 @@ if __name__ == "__main__":
         print("Closing terminal window completely…")
         time.sleep(2)
         os._exit(0)
-
+    
 
 ''' -------------===============-----------IMPORTANT TO DO:-------------===============-----------
 -------------===============------------------------===============------------------------===============-----------
 -------------===============------------------------===============------------------------===============------------------------===============-----------
 high prio/debug:
+    ==> Set-up basic z-stack logic ✅
+        --> need to fix the semantics because now z-stack is inside inner loop --> is not scalable organizational-wise
+            --> could probably try to just calculate a list of coordinates at the beginning including supergrid home ones but would require to redo entire scan logicl;
+                --> low prio because funcationality is bug free
+            
+    ==> set-up almost guaranteed way of performing a z-stack with no objective/turret/stage/sample collisions✅
+    ==> may not be controlling gain output as dB but gain input i.e. ; y dB = 20 * log_base_10 (power out/power in) --> the gain setting
+            could be controlling power out instead of the actually num, y dB, which is counter intuitive
+    ==> Add a progress meter icon
     ==> Address ping-ASI console so it's almost fail_safe; will do 900 (30 x 30) brightfield scans at 0.1 mm distance delta y and delta x; 10x to see if failure happens once
         Results: PASSED - exactly 1800 files (1 data 1 header file) ✅ ✅ ✅ 
     ==> Change GUI lay-out --> Make categories more distinct and style more eye-friendly ✅ ; can still improve further
@@ -3567,11 +4199,16 @@ high prio/debug:
     ==> ** Made secondary camera process close on user esc keystroke + made process shut down before closing main camera to avoid extra frames taken**
     ==>***UPLOAD TO GITHUB***✅
     
+    ==> Move start button location ✅
+    ==> Push to github
+    
     ==> ***MAKE DISPATCH METHOD FOR SYS.EXCEPTHOOK AND THREADING.EXCEPT HOOK --> LINK PSU STATS TO TERMINAL ; for general purpose exceptions to know if theres correlated errors
     ==> **Make test case injections to make sure GUI interface is working** 
     ==> 
-    ==>**CLICKING AUTOFRAMERATE ON IN SPECTRONON SETTINGS CAN CHANGE FIRMWARE TO ADJUST TO AUTO EXPOSURE WHICH OVERWRITES OUR VALUES;
-        ==> AND/OR "ENABLE ACQUISITION FRAME CHECKED IN PYPYLON VIEWER ACCIDENTALLY UNDER 
+    ==>**CLICKING AUTOFRAMERATE ON IN SPECTRONON SETTINGS CAN CHANGE FIRMWARE TO ADJUST TO AUTO EXPOSURE WHICH OVERWRITES OUR VALUES;✅✅
+        ==> AND/OR "ENABLE ACQUISITION FRAME CHECKED IN PYPYLON VIEWER ACCIDENTALLY UNDER  ✅✅
+                --> Work around on 2/13/26 made in the <HSI_Scanner> class cc modify_AcquisitionFrameRate()
+
 
     ==?? *******CANNOT HAVE THE JOYSTICK'S BUTTON DEPRESSED (in the slow mode) OTHERWISE 's' appears next to target location instead of 'fB' page 8 of manual
     ==> **Add button for magnifications to scale user input implicitly assuming brightfield**
