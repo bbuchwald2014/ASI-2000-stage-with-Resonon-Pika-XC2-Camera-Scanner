@@ -30,7 +30,7 @@ import regex as re
 import keyboard # pip install keyboard
 from typing import Tuple, List, Iterable, Sequence
 from typing import Callable, TypeVar, Any, Optional, Dict, Union
-from itertools import product  # --- Build permutation tree of (debug_type, strategy_type) ---
+import itertools # some reason --> doesnt work <from itertools import product>  # --- Build permutation tree of (debug_type, strategy_type) ---
 import gc
 import types
 from decimal import Decimal, InvalidOperation
@@ -106,8 +106,8 @@ import warnings
 ##HSI SCANNER INIT##
 ENABLE_LIVE_KEYBOARD = True
 ENABLE_MINIMUM_CAMERA_SETTINGS = True #is mandatory in current set-up
-USER_CONTINOUS_SECONDARY_CAMERA_SNAPSHOT = False
-USE_SECONDARY_CAMERA = False
+USER_CONTINOUS_SECONDARY_CAMERA_SNAPSHOT = True
+USE_SECONDARY_CAMERA = True
 ##MAKE_GUI CLASS##
 DEFAULT_FOLDER = Path(r"E:\Users\Ben\Programs\HSI Programs\z\Data") #string arg not os.path arg --> changed to Path obj not for flexibility
 #DEFAULT_FOLDER = pathlib.Path(r"E:\Users\Ben\Programs\HSI Programs\z\Data\working_camera_2")
@@ -126,7 +126,7 @@ except NameError:
 MAKE_DEBUG_FILE = True 
 DEBUG_FRAMES = True
 OVERRIDE_DEBUG_FILE = True
-TIME_TO_MANUALLY_FOCUS = False
+TIME_TO_MANUALLY_FOCUS = True
 ##MS2000 CLASS##
 BACKLASH: float = 0.004  #in mm
 ACCEL_TIME: float = 50 #in ms     Constants for class (global reference currently); **MINIMUM POSSIBLE ACCEL/DECEL TIME FOR ~6.86? mm ENCODERS
@@ -176,7 +176,7 @@ Basic code intuition:
     with at least 1 being community supported.If you wish to use PySimpleGUI without the key expiring or want support, then you can buy a Commercial License which is 
     good perpetually.'''
 
-import serial
+
 from serial import Serial, SerialException, EIGHTBITS, PARITY_NONE, STOPBITS_ONE # pyright: ignore[reportGeneralTypeIssues]
 from serial.tools import list_ports
 from pypylon import pylon
@@ -791,7 +791,7 @@ class HSI_Scanner:
     C = 322.6319     # class variable: constant calibration coefficient
     SENSOR_DIMS = (1936, 1216)  # class variable: expected full Basler sensor dimensions (width, height)
     T = TypeVar("T")  # generic type variable used in callable precision functions (for IDE typing)
-    default_camera: Optional[pylon.InstantCamera] = None #Should be hardcoded to 1 camera type; pika xc2 because methods make not work for others; class variable bc happens before scan
+    default_camera: Optional[pylon.InstantCamera] = None #Should be hardcoded to 1 camera type; pika xc2 because methods may not work for others; class variable bc happens before scan
     _dispatch_installed: bool = False  # guard   
 
     # ------------------------- #
@@ -860,7 +860,7 @@ class HSI_Scanner:
             f"{[name for name in dir(our_node_map) if callable(getattr(our_node_map, name))]}"
         )
 
-        import itertools
+
         attrs_to_check: list[str] = ['GetNode', 'GetNodes', 'GetNumNodes']
         acquisition_param_to_check: list[str] = ["AcquisitionFrameRate", "ResultingFrameRate", "ResultingFrameRateAbs"]
         fkv_pairs = list(itertools.product(attrs_to_check, acquisition_param_to_check))
@@ -868,12 +868,16 @@ class HSI_Scanner:
         acq = "AcquisitionFrameRateEnable"
         
         self.modify_AcquisitionFrameRate()
-        
-        
-        type(self)._install_dispatchers()
+
         # ---- Initial temperature (assuming this static/classmethod exists) ----
         self.initial_temperature = HSI_Scanner.get_temperature(which_subdevice=self.camera)
         
+
+        type(self)._install_dispatchers()
+        
+        self._set_camera_pixel_format(cur_cam = self.camera, pixel_format = "Mono12")
+                
+        self.memory_type = self.camera.PixelFormat.GetValue()   
         # Handle initial camera settings if enabled
         if ENABLE_MINIMUM_CAMERA_SETTINGS:
             initial_exposure, initial_gain = self._initialize_camera_settings()
@@ -885,63 +889,71 @@ class HSI_Scanner:
             pass  # Change logic later if needed
         self._set_ROI()
         
-        print(f"Using camera: {self.camera.GetDeviceInfo().GetModelName()}")
+        print(f"Using main camera: {self.camera.GetDeviceInfo().GetModelName()}")
         
         # ---- Secondary camera logic ----
         if USE_SECONDARY_CAMERA:
-            _secondary_device_info = next((d for d in devices if d is not device_info), None)
-            self.set_up_secondary_camera(secondary_info=_secondary_device_info, save_dir_override = Make_GUI.cur_dir)
-        else:
             try:
-                self._set_camera_pixel_format("Mono12")
+                _secondary_device_info = next((d for d in devices if d is not device_info), None)
+                self.set_up_secondary_camera(tl_factory = tl_factory, secondary_info =_secondary_device_info, 
+                                             pixel_format = "RGB8", save_dir_override = Make_GUI.cur_dir)
+                
+        
+            #except:
+                #self._set_camera_pixel_format(cur = self.camera, "Mono12")
 
             except LookupError as e: 
-                f'Could not use genicam funcs to modify data memory type camera will use at approximately line #{(DebugProgram.get_line_number)}'
-            
-            finally:             
-                self.memory_type = self.camera.PixelFormat.GetValue()        
+                f'Could not use genicam funcs to modify data memory type camera will use at approximately line #{(DebugProgram.get_line_number())}'
+       
 
     # ------------------------- #
     # Secondary camera helpers
     # ------------------------- #
     # ------------------------- #            self._snapshot_event.set()
     @staticmethod
-    def _launch_focus_gui(serial: str, second_camera_save_dir: str = "", stop_event: MpEvent | None = None, snapshot_event: MpEvent | None = None):
+    def _launch_focus_gui(serial: str, second_camera_save_dir: str = "", stop_event: MpEvent | None = None, 
+                          snapshot_event: MpEvent | None = None, pixel_format: str = ""):
         focus.CameraApp.receive_serial(serial)
         focus.CameraApp.main(second_camera_save_dir, stop_event, snapshot_event)
 
-    def set_up_secondary_camera(self, secondary_info, save_dir_override: str = ""):
-        if secondary_info is not None:
-            focus_serial = secondary_info.GetSerialNumber()
-
-            # Stop event to signal the child process to quit
-            stop_event = Event()
-            
-            
-            continous_snapshot = USER_CONTINOUS_SECONDARY_CAMERA_SNAPSHOT 
-            # Event to toggle continuous snapshots
-            if continous_snapshot:
-                self._snapshot_event = Event()  # keep a reference
-            else:
-                self._snapshot_event = None
-            self._close_secondary_camera_event = stop_event
-
-            # pick save_dir: either override, else use constant, else empty
-            save_dir = save_dir_override or SAVE_DIR_CONST or ""
-
-            # Launch focus GUI in its own process
-            p = Process(
-                target=HSI_Scanner._launch_focus_gui,
-                args=(focus_serial, save_dir, stop_event, self._snapshot_event,),
-                daemon=True
-            )
-            self.secondary_process = p
-            p.start()
-            print(f"[INFO] Focus GUI launched in child process PID={p.pid}")
-
+    def set_up_secondary_camera(self, tl_factory, secondary_info, pixel_format: str = "" , save_dir_override: str = ""):
+        
+        assert secondary_info is not None #should crash it here as to not search pypylon tl.factory twice
+        secondary_cam = HSI_Scanner.get_camera_var_type(pylon.InstantCamera(tl_factory.CreateDevice(secondary_info)))
+        
+        secondary_cam.Open()
+        
+        focus_serial = secondary_info.GetSerialNumber()
+        print(f"focus serial is {focus_serial}")
+        # Stop event to signal the child process to quit
+        stop_event = Event()
+        
+        continous_snapshot = USER_CONTINOUS_SECONDARY_CAMERA_SNAPSHOT 
+        # Event to toggle continuous snapshots
+        if continous_snapshot:
+            self._snapshot_event = Event()  # keep a reference
         else:
-            print("[INFO] No secondary camera detected; setting primary pixel format to Mono12 by default.")
-            self._set_camera_pixel_format("Mono12")
+            self._snapshot_event = None
+        self._close_secondary_camera_event = stop_event
+
+        # pick save_dir: either override, else use constant, else empty
+        save_dir = save_dir_override or SAVE_DIR_CONST or ""
+
+        
+        print(f'Attempting <{str(pixel_format)}> format for secondary camera')
+        self._set_camera_pixel_format(cur_cam = secondary_cam, pixel_format = pixel_format)
+
+        secondary_cam.Close()
+        #time.sleep(1000)
+        # Launch focus GUI in its own process
+        p = Process(
+            target=HSI_Scanner._launch_focus_gui,
+            args=(focus_serial, save_dir, stop_event, self._snapshot_event, pixel_format),
+            daemon=True
+        )
+        self.secondary_process = p
+        p.start()
+        print(f"[INFO] Focus GUI launched in child process PID={p.pid}")
 
 
     def close_secondary_camera(self):
@@ -1001,43 +1013,45 @@ class HSI_Scanner:
         print("HSI_Scanner object destroyed.")
 
         #should be dispatched!!
+    
         
-    def _set_camera_pixel_format(self, pixel_format):
-        """Attempt to set the primary camera's pixel format with fallback to Mono8."""
-        try:
-            print(f"INITIAL camera data type is {self.camera.PixelFormat.GetValue()}")
-            supported_formats = self.camera.PixelFormat.GetSymbolics()
-            if pixel_format in supported_formats:
-                self.camera.PixelFormat.SetValue(pixel_format)
-                print(f"Primary camera pixel format set to: {pixel_format}")
-            else:
-                print(f"Primary camera does not support {pixel_format}, falling back to Mono8.")
-                self.camera.PixelFormat.SetValue("Mono12")
-        except Exception as e:
-            print(f"Error setting pixel format: {e}. Falling back to Mono8.")
-            self.camera.PixelFormat.SetValue("Mono8")
+        #should be dispatched!!
+    def _set_camera_pixel_format(self, cur_cam=None, pixel_format="Mono8"):
 
-    #should be dispatched!!
-    def _match_pixel_format_to_secondary(self): 
-        """Match primary camera's pixel format to the secondary camera's format if possible."""
-        try:
-            secondary_format = self.secondary_camera.PixelFormat.GetValue()
-            print(f"Secondary camera pixel format: {secondary_format}")
+        assert isinstance(cur_cam, pylon.InstantCamera)
 
-            # Prefer Mono12 if supported by primary camera (good default for your data)
-            if "Mono8" in self.camera.PixelFormat.GetSymbolics():
-                self._set_camera_pixel_format("Mono8")
-            else:
-                # Otherwise, try to match the secondary exactly if supported
-                if secondary_format in self.camera.PixelFormat.GetSymbolics():
-                    self._set_camera_pixel_format(secondary_format)
+        try:
+            if not cur_cam.IsOpen():
+                cur_cam.Open()
+
+            node = cur_cam.PixelFormat
+
+            print("INITIAL:", node.GetValue())
+            print("SUPPORTED:", node.GetSymbolics())
+
+            pixel_format = pixel_format.replace(" ", "")
+
+            try:
+                if pixel_format in node.GetSymbolics():
+                    print(f"Setting PixelFormat → {pixel_format}")
+                    node.SetValue(pixel_format)
                 else:
-                    self._set_camera_pixel_format("Mono12")
-        
-        except Exception as e:
-            print(f"Failed to match pixel format: {e}")
-            self._set_camera_pixel_format("Mono8 or Mono12")
+                    print("Unsupported → Mono8 fallback")
+                    node.SetValue("Mono12")
 
+            except Exception as e:
+                print(f"PixelFormat set failed: {e}")
+                print("Falling back to Mono12")
+
+                try:
+                    node.SetValue("Mono12")
+                except Exception as e2:
+                    print(f"Hard fallback 12 bit memory failed {DebugProgram.get_line_number()}: {e2}")
+
+        except Exception as e:
+            print(f"Camera error: {e}")
+                
+            
     def _initialize_camera_settings(self) -> Tuple[float, float]:
             # Disable auto gain/exposure
         self.camera.GainAuto.SetValue('Off')
@@ -1956,7 +1970,7 @@ class HSI_Scanner:
 
         combo_map = {
             (d, s): (debug_map[d], strategy_map[s])
-            for d, s in product(debug_map.keys(), strategy_map.keys())
+            for d, s in itertools.product(debug_map.keys(), strategy_map.keys())
         }
 
         # --- Select debug_fn + grab_strategy ---
@@ -2513,41 +2527,43 @@ class HSI_Scanner:
 
 
     @singledispatchmethod
-    @classmethod
-    def get_camera_var_type(cls, arg, *, set_class: bool = False, verbose: bool = False):
+    def get_camera_var_type(self, arg, *, set_class=False, verbose=False):
         raise TypeError(f"Unsupported type: {type(arg)!r}")
 
     '''Should use dispatcher to make clones of some current class dynamic funcs as static/class. Broad scale architecture because some instances = real scan run time; but 
         sometimes the camera (pika xc2) is required outside of that context so a super broad generator/dispatcher is required'''
     @classmethod
     def _install_dispatchers(cls) -> None:
-        """Register singledispatch handlers exactly once. Kept INSIDE the class."""
         if cls._dispatch_installed:
             return
 
-        # --- define local impls that accept (c, arg, ...); 'c' will be the class ---
-        def _impl_scanner(c, arg, *, set_class=False, verbose=False):
-            if verbose: print("dispatch: HSI_Scanner")
+        dispatcher = cls.get_camera_var_type # IMPORTANT: use raw dispatcher object
+
+        def _impl_scanner(arg, *, set_class=False, verbose=False):
+            if verbose:
+                print("dispatch: HSI_Scanner")
             cam = getattr(arg, "camera", None)
             if set_class and cam is not None:
-                c.default_camera = cam
+                HSI_Scanner.default_camera = arg 
             return cam
 
-        def _impl_camera(c, arg: pylon.InstantCamera, *, set_class=False, verbose=False):
-            if verbose: print("dispatch: InstantCamera")
+        def _impl_camera(arg, *, set_class=False, verbose=False):
+            if verbose:
+                print("dispatch: InstantCamera")
             if set_class:
-                c.default_camera = arg
+               HSI_Scanner.default_camera = arg 
             return arg
 
-        def _impl_none(c, arg, *, set_class=False, verbose=False):
-            if verbose: print("dispatch: None")
+        def _impl_none(arg, *, set_class=False, verbose=False):
+            if verbose:
+                print("dispatch: None")
             if set_class:
-                c.default_camera = None
+                HSI_Scanner.default_camera = arg 
             return None
-
         try:
             # --- perform registrations using explicit types (no forward-ref strings) ---
-            cls.default_camera = cls.get_camera_var_type.register(cls)(_impl_scanner)            # for HSI_Scanner instances
+            
+            cls.get_camera_var_type.register(cls)(_impl_scanner)            # for HSI_Scanner instances
             cls.get_camera_var_type.register(pylon.InstantCamera)(_impl_camera)
             cls.get_camera_var_type.register(type(None))(_impl_none)
 
@@ -2556,6 +2572,7 @@ class HSI_Scanner:
         except RuntimeError as e:
             print(f'Failed to use @singledispatchmethod')
             print(f'code at {DebugProgram.get_line_number}')   
+        
                 
     '''!!!!!!!!SENSOR CORRECTION!!!!!!!
 

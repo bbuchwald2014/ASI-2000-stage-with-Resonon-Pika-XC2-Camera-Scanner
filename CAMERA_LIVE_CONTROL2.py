@@ -63,6 +63,8 @@ COPY_DATA     = True
 ROTATE_CCW    = False     # rotate display by 90° CCW
 REFLECT_X_AXIS = True     # flip vertically (mirror across X-axis)
 
+MAX_FRAME_COUNTER = 100
+
 if ENABLE_TIMING:
     import time
 
@@ -107,16 +109,18 @@ class CameraApp:
         if tk._default_root is None:
             cls.root = tk.Tk()
         else:
-            cls.root = tk.Toplevel(tk._default_root)
+            cls.root = tk.Toplevel(tk._default_root) 
 
-        serial_to_find = cls._preset_serial or "40633494"
+        serial_to_find = (cls._preset_serial,"40633494", "40742271")
+                                                        #40633494 is for Basler ace 2 a2A2048-114umBAS;
+                                                #while   40742271 is our  Basler ace 2 a2A2464-77ucBAS
         app = CameraAppChild(cls.root, serial_to_find, stop_event, toggle_event)
 
         if stop_event is not None:
             def watch_stop():
                 stop_event.wait()
                 print("[Focus GUI] Received stop signal, quitting...")
-                app.quit()
+                app.quit() 
             threading.Thread(target=watch_stop, daemon=True).start()
 
         if isinstance(cls.root, tk.Tk):
@@ -124,14 +128,20 @@ class CameraApp:
 
 
 class CameraAppChild(CameraApp):
-    def __init__(self, root: tk.Tk, serial_to_find: str,
+    def __init__(self, root: tk.Tk, serial_to_find: tuple[str],
                  stop_event: threading.Event | MpEvent | None = None,
-                 toggle_event: MpEvent | None = None):
+                 snapshot_event: MpEvent = None,
+                 toggle_event: MpEvent | None = None,
+                 pixel_type: str = "",
+                 gain: int = 0,
+                 exposure_in_ms: int = 0,
+                 ):
         self.root = root
         self.root.title("Basler Camera Live Feed")
+        
         self.stop_event = stop_event
         self.toggle_event = toggle_event
-
+        self.snapshot_event = snapshot_event
         # --- Setup secondary camera folder ---
         base_dir = (CameraApp.save_dir or "").strip() or os.getcwd()
         self.secondary_save_dir = os.path.join(base_dir, "secondary_camera")
@@ -140,13 +150,31 @@ class CameraAppChild(CameraApp):
 
         # --- Camera setup ---
         factory = pylon.TlFactory.GetInstance()
-        di = pylon.CDeviceInfo()
-        di.SetSerialNumber(serial_to_find)
-        try:
-            self.camera = pylon.InstantCamera(factory.CreateDevice(di))
-            self.camera.Open()
-        except pylon.GenericException as e:
-            raise RuntimeError(f"Camera '{serial_to_find}' not found.") from e
+
+        devices = factory.EnumerateDevices()
+
+        target_serials = {s for s in serial_to_find if isinstance(s, str)}
+
+        self.camera = None
+
+        print("Available cameras:")
+        for i, d in enumerate(devices):
+            print(f"Index {i}: Model={d.GetModelName()}, Serial={d.GetSerialNumber()}")
+
+        for dev in devices:
+            serial = dev.GetSerialNumber()
+
+            if serial in target_serials:
+                print(f"SELECTED CAMERA: {serial}")
+
+                cam = pylon.InstantCamera(factory.CreateDevice(dev))
+                cam.Open()
+
+                self.camera = cam
+                break
+
+        if self.camera is None:
+            raise RuntimeError(f"Camera(s) {serial_to_find} not found.")
 
         if hasattr(self.camera, "GainAuto"):
             self.camera.GainAuto.SetValue('Off')
@@ -157,13 +185,14 @@ class CameraAppChild(CameraApp):
         self.gain_max = getattr(self.camera.Gain, "Max", 20.0)
         self.exp_min  = getattr(self.camera.ExposureTime, "Min", 100.0)
         self.exp_max  = getattr(self.camera.ExposureTime, "Max", 1000000.0)
-
+        self.max_frame_counter = MAX_FRAME_COUNTER
+        
         if hasattr(self.camera.Gain, "Value"):
             self.camera.Gain.Value = 0
         if hasattr(self.camera.ExposureTime, "SetValue"):
-            self.camera.ExposureTime.SetValue(16300)#(160000)
+            self.camera.ExposureTime.SetValue(10000)#(160000)
 
-        self.camera.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)
+        self.camera.StartGrabbing(pylon.GrabStrategy_LatestImages)
 
         # --- UI elements ---
         self.label = tk.Label(root)
@@ -185,24 +214,69 @@ class CameraAppChild(CameraApp):
 
         self.copy_logic = self.setup_copy_func()
         self.continuous_snapshots_enabled = False  # start OFF by default
-
+        self.save_one_frame = True   # or False by default
         # --- Start frame loop ---
-        self.update_frame()
+        self.update_frame() #(current_frame_counter = 0)
 
     # ---------- Frame loop ----------
     def update_frame(self):
+
+        if self.camera.IsGrabbing():
+            try:
+                grab_result = self.camera.RetrieveResult(
+                    100,
+                    pylon.TimeoutHandling_Return
+                )
+
+                if grab_result is not None:
+
+                    if grab_result.GrabSucceeded():
+                        img = self.convert_image_coloring_scheme(grab_result.Array)
+                        self.current_snapshot = img
+                        self.produce_image_with_modifiers(img)
+
+                        # ONE snapshot per event
+                        if self.snapshot_event and self.snapshot_event.is_set():
+                            self.save_snapshot(img)
+                            self.snapshot_event.clear()
+                            self.status.config(text=self.status_text())
+
+                    grab_result.Release()
+
+            except pylon.GenericException as e:
+                error_log(f"RetrieveResult failed: {e}")
+
+        self.root.after(30, self.update_frame)  # <- IMPORTANT: only ONCE
+        '''   
+        #print(f'current_frame_counter: {current_frame_counter},\t self.max_frame_counter is {self.max_frame_counter}')
+        
+        #if current_frame_counter >= self.max_frame_counter:
+            #self.continuous_snapshots_enabled
+            #return 
         # --- Toggle continuous snapshots if event is triggered ---
-        if self.toggle_event and self.toggle_event.is_set():
+        if self.toggle_event and self.toggle_event.is_set():# or #current_frame_counter >= self.max_frame_counter:
             self.continuous_snapshots_enabled = not self.continuous_snapshots_enabled
             state = "ON" if self.continuous_snapshots_enabled else "OFF"
             print(f"[Secondary Camera] Continuous snapshots toggled {state}")
             self.toggle_event.clear()
+            #self.quit()
 
         # --- Grab frame if camera is active ---
         if self.camera.IsGrabbing():
             try:
-                grab_result = self.camera.RetrieveResult(5000, pylon.TimeoutHandling_ThrowException)
+                grab_result = self.camera.RetrieveResult(5000, pylon.TimeoutHandling_ThrowException) #not to confuse 5000 with integration time, diff metric
+                
                 if grab_result.GrabSucceeded():
+                    img = self.convert_image_coloring_scheme(grab_result.Array)
+                    self.current_snapshot = img
+                    self.produce_image_with_modifiers(img)
+
+                    # ✅ Save exactly ONE frame
+                    if self.save_one_frame and self.stop_event and self.stop_event.is_set():
+                        self.save_snapshot(img)
+                        self.save_one_frame = False
+               
+                    if grab_result.GrabSucceeded():
                     src = grab_result.Array
                     img = self.convert_image_coloring_scheme(src)
                     self.current_snapshot = img
@@ -211,11 +285,15 @@ class CameraAppChild(CameraApp):
                     if self.continuous_snapshots_enabled:
                         self.save_snapshot(img)
                 grab_result.Release()
+            
             except pylon.GenericException as e:
                 error_log(f"RetrieveResult failed: {e}")
-
+            
+        #current_frame_counter += 1
+            
         self.status.config(text=self.status_text())
-        self.root.after(10, self.update_frame)
+        self.root.after(5, self.update_frame)#(current_frame_counter= current_frame_counter)
+        '''     
 
     # ---------- Save snapshot ----------
     def save_snapshot(self, img):
