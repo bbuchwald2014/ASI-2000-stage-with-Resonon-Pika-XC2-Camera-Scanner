@@ -247,8 +247,7 @@ class Post_Data_Process():
         print(f'len of file name is {len(file_names)}; {range(len(file_names))}')
         for i in range(len(file_names)):
             print(f"i is {i}")
-            import time
-            time.sleep(1)
+
             file = file_names[i]
             coord = coords[i]
             coord_index = self.actual_cords.index(coord)
