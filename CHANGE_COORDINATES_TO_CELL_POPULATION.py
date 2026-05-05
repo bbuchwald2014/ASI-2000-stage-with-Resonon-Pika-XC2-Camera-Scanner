@@ -4,9 +4,11 @@ import numpy as np
 import os
 import glob
 import regex as re
+import json
 from typing import Literal, TypeAlias, Any, TypedDict, Tuple, TypeVar
 from collections.abc import Iterable
-
+import tkinter as tk
+import gc
 
 globbed_objs: TypeAlias = os.PathLike | str
 tup_of_tup: TypeAlias = tuple[tuple[Any, ...], ...]
@@ -21,8 +23,14 @@ class Final_File_to_Final_Coords(TypedDict):
 
 c_dict = Final_File_to_Final_Coords
 
+MODIFY_FILE_NAMES = False
+
+MODIFY_MEMORY_SIZE= True
+
+DELETE_FILES = True
+
 class  Hold_Meta_Data():
-    FOLDER = r'E:\MCF_7_Breast_Cancer\Real\With_RGB_camera\pt_2'
+    FOLDER = r'C:\MCF_7_Breast_Cancer\Real\With_RGB_camera\pt_2'
                                         #dict[str, (x_coord, y_coord)]
 
     ACTUAL_COORDINATES_BASE =(
@@ -40,7 +48,6 @@ class  Hold_Meta_Data():
 # Base populations pattern : <num>%_<MCF>_><num>%_<NIH>
 #coords: tuple[float, float] = 
 
-
 class Post_Data_Process():
     def __init__(self, folder_name: globbed_objs, actual_coordinates: tup_of_tup, cell_populations: tup_of_tup) -> None:
         
@@ -49,22 +56,25 @@ class Post_Data_Process():
         self.folder = folder_name
         
         self.extensions = "*.npy", "*.json"
-    
+
         self.globbed_files =  None
         self.gcd = None
         
         self._pre_vars = self.__dict__.copy() 
         self._post_vars = None
-       
-
-    def psuedo_main(self) -> list[Any]: #return instances where fields didn't change; means state change failed
-        
         files = []
         for ext in self.extensions:
             files.extend(glob.glob(f"*{ext}", root_dir=self.folder))
-        
+        print(f'len of files {len(files)}')
+        files = files#[100:200]
+        print(f'len of files {len(files)}')
         self.globbed_files = files
         del files
+        self.tk_root= tk.Tk()
+
+    def psuedo_main(self) -> list[Any]: #return instances where fields didn't change; means state change failed
+        
+
         #print(self.globbed_folders[1]) #prints something like actual_coords_x-0.0001_y-51.6906_expected_none_cur_z_pos_0.0023_expected_z_position_0.0_um_sub_grid_row_2_col_0_data.npy
 
         self.gcd = self._find_gcd_within_iterables(self.actual_cords)
@@ -83,8 +93,218 @@ class Post_Data_Process():
 
         self.modify_file_name_via_files(self.files_computed)
         return states
+    
+    def modify_files_memory(self, delete_outlier_files_and_modify_others: bool):
+        '''Match file size(effectively numpy dimensions) so that any NN has a consistent input params
+            Delete the outliers, round down to lowest not outlier npy value. Our .npy files are
+            of (spectral, spatial, line) but that type wasn't explicitly set with <np.dtype()>
+                e.g. <dt = np.dtype([('time', [('min', np.int64), ('sec', np.int64)]),('temp', float)])>'''
+        
+        outlierConstant = 1.5
+        assert self.globbed_files is not None
+        files_not_opened = []
+        files_opened = []
+        file_dims = []
+        memory_all_files = {"files_opened:": files_opened, "file_dims:" : file_dims, "temp": None}
+
+        self.__save_user_input: bool = False
+        
+        for npy_file in [npy_ext for npy_ext in self.globbed_files if npy_ext.endswith('.npy')]:
+            try:
+                npy_file = str(os.path.join(self.folder, npy_file))
+                arr = np.load(npy_file, mmap_mode="r")
+                file_dims.append(arr.shape)
+                files_opened.append(npy_file)
+                del arr
+
+            except Exception:
+                files_not_opened.append(npy_file)
+                print(f'Could not get memory of file: \t {npy_file}')
+                continue
+                    
+        line_dims = np.array([d[2] for d in file_dims if len(d) >= 3], dtype=np.float64)
+        print(f'line dims is: {line_dims}')
+
+        temp = np.percentile(a=line_dims, q=(25, 75), method="closest_observation")
+        lower_quartile, upper_quartile = temp[0], temp[1]
+        
+        IQR = (upper_quartile - lower_quartile) * outlierConstant
+        quartileSet = (lower_quartile - IQR, upper_quartile + IQR)
+        
+        ui_state = None
+        files_truthy = None
+        save_user_input_truthy = True
+        commands = {}
+        window = None
+
+        if self.tk_root:
+            files_truthy, save_user_input_truthy, ui_state = self._instaniate_tk_window()
+            commands = ui_state["commands"]
+            window = ui_state.get("window", None)
+            print(f'went into {self.tk_root}')
+            self.tk_root.mainloop()
+        
+        
+        def __update_tk(file=None, **kwargs):
+            window = kwargs.get("window", None)
+
+            if not window or not window.winfo_exists():
+                return
             
+            cmds = kwargs.get("commands", {})
+
+            for cmd in cmds.values():
+                try:
+                    cmd(file)
+                except:
+                    pass
+
+            return
+
+        print(f'lower quartile: {lower_quartile};\t upper quartile: {upper_quartile}')
+
+        valid_lines = [l for l in line_dims if quartileSet[0] <= l <= quartileSet[1]]
+        if not valid_lines:
+            valid_lines = line_dims.tolist()
+
+        target_line_dim = int(min(valid_lines))
+        print(f'target_line_dim to round to is {target_line_dim}')
+        meta_log = []
+
+        to_delete_Lambda = lambda _: self._delete_files(
+                            main_file_to_delete=npy_file,
+                            live_file_delete=commands.get("should_delete", lambda: True)()
+                        )
+        for i, npy_file in enumerate(files_opened):
+            try:
+                #np.save(npy_file, np.array(arr)) <-- doesnt open properly throwing windows 8 error 
+                with open(npy_file, "rb") as f:
+                    version = np.lib.format.read_magic(f)
+                    shape, _, _ = np.lib.format._read_array_header(f, version)
+          
+                    if shape[2] <= quartileSet[0] and save_user_input_truthy:
+                        print("DELETING at {i} , {npy_file}")
+                        __update_tk(file=npy_file, **ui_state)
+                        deleted = to_delete_Lambda(None)
+                        meta_log.append({
+                            "files": deleted["files_to_delete"],
+                            "action": "deleted" if delete_outlier_files_and_modify_others else "flagged_for_deletion",
+                            "line_dim": int(shape[2])
+                        })
+                    elif len(shape) >= 3 and shape[2] > target_line_dim:
+                        f.seek(0)
+                        arr = np.load(f)  # FIX: no context manager
+                        arr = arr[:, :, :target_line_dim]
+                        print(f'ENTERED: new arr will be {arr.shape}')
+                        if delete_outlier_files_and_modify_others:
+                            with open(npy_file, "wb") as fw:
+                                np.save(fw, np.array(arr))
+                            meta_log.append({
+                                "file": npy_file,
+                                "action": "trimmed",
+                                "new_dim": target_line_dim
+                            })
+                        del arr
+            except Exception as e:
+                print(f"FAILED FILE {npy_file}: {e}")  # IMPORTANT: stop silent failure
+                files_not_opened.append(npy_file)
+                to_delete_Lambda(None)
+
+            gc.collect()
             
+        meta_path = os.path.join(os.path.dirname(files_opened[0]), "modification_log.json")
+        with open(meta_path, "w") as f:
+            json.dump(meta_log, f, indent=2)
+
+        memory_all_files["temp"] = {
+            "target_line_dim": target_line_dim,
+            "quartiles": (lower_quartile, upper_quartile),
+            "bounds": quartileSet,
+            "log_file": meta_path
+        }
+
+        def callback():
+            if window and window.winfo_exists():
+                window.destroy()
+            if self.tk_root and self.tk_root.winfo_exists():
+                self.tk_root.quit()
+
+        self.tk_root.after(1000, callback)
+        print(f'Finished modifiying files returning <memory_all_files> with type: {type(memory_all_files)}')
+        return memory_all_files
+
+
+    def _instaniate_tk_window(self) -> tuple[bool, bool, dict[str, tk.Widget]]:
+        radio_like = tk.Toplevel(self.tk_root)
+
+        files_truthy = tk.BooleanVar(value=False)
+        save_user_input = tk.StringVar(value="SKIP")
+        file_to_scroll_bar = tk.StringVar(value = "")
+        
+        text = 'long ' * 20
+        text += 'line\n' * 20
+        
+        tk.Scrollbar(radio_like, orient=tk.HORIZONTAL).pack()
+        tk.Scrollbar(radio_like, orient=tk.VERTICAL).pack()
+        
+        files_deleted = tk.Label(radio_like, text='Files Deleted', font=('Arial', 24))
+        files_deleted.pack()
+
+        file_listbox = tk.Listbox(radio_like, width=80, height=10)
+        file_listbox.pack()
+        
+        result = {"SKIP": False, "YES": True, "NO": False, False: False, True: True}
+
+        def close_and_store():
+            radio_like.destroy()
+
+        tk.Radiobutton(radio_like, text="YES", variable=files_truthy, value=True).pack()
+        tk.Radiobutton(radio_like, text="NO", variable=files_truthy, value=False).pack()
+
+        tk.Button(radio_like, text="OK", command=close_and_store).pack()
+
+        commands = {
+            "add_file": lambda file=None: file_listbox.insert(tk.END, file) if file is not None else None,
+            "refresh": lambda: self.tk_root.update(),
+            "should_delete": lambda: files_truthy.get(),
+            "should_skip": lambda: save_user_input.get()
+        }
+
+        return files_truthy.get(), result[save_user_input.get()], {
+            "window": radio_like,
+            "commands": commands
+        }
+        
+    def _delete_files(self, main_file_to_delete: os.PathLike | str,
+                        default_file_types_to_check: tuple[str, ...] = (".npy", ".json"),
+                        save_user_input = False,
+                        live_file_delete: bool = False) -> dict:
+            
+        '''Pass in a .npy file or .json expected but allows others if it self.extensions; assumes not mutation'''
+        
+        default = default_file_types_to_check
+
+        # use regex to grab extension at end (literal dot + non-dots until end)
+        ending_match = re.search(pattern=r'\.[^.]+$', string=str(main_file_to_delete))
+        ending = ending_match.group(0) if ending_match else ""
+
+        files_to_delete = [
+            str(main_file_to_delete).replace(ending, ext)
+            if ext in self.extensions else None
+            for ext in default
+        ] 
+        # make sure delete is subset/ are elements of self.extension no mutations
+
+        if (files_to_delete is not None) and (live_file_delete != False):  # use parameter, not global 
+            try:
+                for file in files_to_delete:
+                    if file and os.path.exists(file):  # should not crash here as this <_delete_files> func will be called from elsewhere
+                        os.remove(file)
+            except:
+                pass
+            
+        return {"files_to_delete": files_to_delete}
+    
     def _make_populations_name(self,
         all_population_splits: tuple[tuple[float, float], ...],
         naming_pattern: str = "num%_MCF_num%_NIH",
@@ -255,7 +475,6 @@ class Post_Data_Process():
             
             print(file)
             
-            
             prefix =  mcf_pop_nih_pop
 
             old_path = os.path.join(data_dir, file)
@@ -287,6 +506,9 @@ if __name__ == "__main__":
 
     del Hmd.CELL_POPULATIONS, Hmd.ACTUAL_COORDINATES_BASE
     
-    states = Process_Data.psuedo_main()
-
-    print(f'All states changed for {type(Process_Data)}') if all(states) else print(f'States didnt change for: {states} in {type(Process_Data)}')
+    if MODIFY_FILE_NAMES:
+        states = Process_Data.psuedo_main()
+        print(f'All states changed for {type(Process_Data)}') if all(states) else print(f'States didnt change for: {states} in {type(Process_Data)}')
+    
+    elif MODIFY_MEMORY_SIZE:
+        Process_Data.modify_files_memory(delete_outlier_files_and_modify_others= DELETE_FILES)
