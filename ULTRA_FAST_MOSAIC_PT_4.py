@@ -26,6 +26,9 @@ FOLDER = Path(r'Z:\Data\Chicago_Cancer\Chiacgo_Slides_1_22_26\Brightfield\10x_ma
 FOLDER = Path(r'Z:\Data\Chicago_Cancer\Chiacgo_Slides_1_22_26\Brightfield\10x_mag\Hyper1_2_Unstained\fixed_kohler_but_no_filters'
 )
 FOLDER = Path(r'Z:\Data\Chicago_Cancer\Chiacgo_Slides_1_22_26\Fluoro\Hyper1_1_Stained')
+FOLDER = Path(r'E:\MCF_7_Breast_Cancer\Real\With_RGB_camera\test')
+FOLDER = Path(r'E:\Lennon_Camera_Project\re\test_homography\re_0.788')
+FOLDER = Path(r'E:\Lennon_Camera_Project\re\test_homography\re_0.788\re_2_by_1')
 
 #FOLDER = Path(r'Z:\Data\Chicago_Cancer\Chiacgo_Slides_1_22_26\Brightfield\10x_mag\Hyper1_1_Stained')
 class Mode:
@@ -43,8 +46,9 @@ setattr(M, use_attribute, True)
 
 if   M.FLUORO:
     #FIXED_BANDS = (85, 95, 105) #output based 660 nm input
-    FIXED_BANDS = (103, 106, 109) #output based 660 nm input
-    FIXED_BANDS = (30, 40, 50)
+    #FIXED_BANDS = (103, 106, 109) #output based 660 nm input
+    #FIXED_BANDS = (30, 40, 50)
+    FIXED_BANDS = (40, 60, 80)
 
 elif M.BRIGHTFIELD:
     FIXED_BANDS =  (20, 25, 30)#(20, 25, 30)
@@ -52,19 +56,19 @@ else:
     FIXED_BANDS = None
 print(f"Using scan type: {use_attribute} = {getattr(M, use_attribute)}")
 
-USE_Z_STACK_SHEETS: bool = True
+USE_Z_STACK_SHEETS: bool = False
 SUPERGRID_ENABLED = False #assumes theres a row/col pattern PER row/col pattern like you see in any scans done with wells
 
 LABEL_MODE = False #labels each individual cube in the image with a title of the file name at the top of it's subsection in the supergrid
 
-GRID_MODE = "auto" #"manual"
-GRID_ROWS = 20
-GRID_COLS = 20
+GRID_MODE = "manual" #"manual"
+GRID_ROWS = 1
+GRID_COLS = 1
 
 #######!~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ !#########
 KEY_ROW = "sub_grid_row_"
 
-TEST_MANUAL_CONTRAST: bool = True
+TEST_MANUAL_CONTRAST: bool = False
 TEST_P1 = np.array([3, 3, 3], dtype=np.float32)
 TEST_P9 = np.array([3000, 3000, 3000], dtype=np.float32)
 

@@ -79,7 +79,8 @@ if TEST_MANUAL_CONTRAST:
         "64": np.uint64,
     }
 
-
+MODIFIER = f'$\\\\[0-{GRID_COLS*GRID_ROWS -1}]\\\\d*'
+EXTENSIONS = "*.npy", "*.png" if MODIFIER is None else f'*.npy', f'({MODIFIER})*.png'
 
 GET_EVERY_CUBE_RAW_MIN_MAX_VALUES: bool = False
 
@@ -110,12 +111,21 @@ FILL_MODE = "blank"
 S_PATTERN = True
 
 
-def find_tiles(folder: Path):
-    paths = natsorted(folder.glob("*.npy"))
-    print(f"[FAST] Found {len(paths)} files in {folder}")
-    if not paths:
-        raise FileNotFoundError(f"No .npy files found in {folder}")
-    return paths
+def find_tiles(folder: Path) -> list[str]:
+    for ext in EXTENSIONS:
+        try:
+            paths = natsorted(folder.glob(ext))
+    
+            if not paths:
+                raise FileNotFoundError(f"No {ext} files found in {folder}")
+        
+        except:
+            paths = []
+            
+        finally:
+            print(f"[FAST] Found {len(paths)} files in {folder}")
+            continue
+            
 
 
 def _leading_int(s: str) -> int | None:
@@ -616,7 +626,6 @@ def main():
 
 
     out_file = FOLDER / f"{OUT_PREFIX}_{OUTPUT_MODE}_{mode_tag}.png"
-    import os
 
     if os.path.exists(out_file):
         folder, filename = os.path.split(out_file)

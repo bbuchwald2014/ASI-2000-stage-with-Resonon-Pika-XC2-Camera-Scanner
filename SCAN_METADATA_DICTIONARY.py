@@ -223,7 +223,7 @@ class MakeParams:
     def create__dict(*, schema: Literal["z_stack"], **kw: Unpack[ZStackParams]) -> ZStackParams: ...
     
     @staticmethod
-    def create__dict(*, schema: SchemaName, **kw: Any) -> ParamsUnion:
+    def create__dict(*, schema: SchemaName, **kw: Any) -> ParamsUnion: #dont use a dictionary builder for each case to avoid faulty type checking
         if schema == "bright":
             return _build_bright(**kw)
         if schema == "fluoro":

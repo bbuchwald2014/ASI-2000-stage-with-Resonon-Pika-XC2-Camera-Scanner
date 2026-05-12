@@ -131,7 +131,7 @@ class CameraAppChild(CameraApp):
     def __init__(self, root: tk.Tk, serial_to_find: tuple[str],
                  stop_event: threading.Event | MpEvent | None = None,
                  snapshot_event: MpEvent = None,
-                 toggle_event: MpEvent | None = None,
+                 toggle_event: MpEvent | bool | None = False,
                  pixel_type: str = "",
                  gain: int = 0,
                  exposure_in_ms: int = 0,
@@ -140,8 +140,8 @@ class CameraAppChild(CameraApp):
         self.root.title("Basler Camera Live Feed")
         
         self.stop_event = stop_event
-        self.toggle_event = toggle_event
         self.snapshot_event = snapshot_event
+        self.toggle_event = toggle_event
         # --- Setup secondary camera folder ---
         base_dir = (CameraApp.save_dir or "").strip() or os.getcwd()
         self.secondary_save_dir = os.path.join(base_dir, "secondary_camera")
@@ -190,7 +190,7 @@ class CameraAppChild(CameraApp):
         if hasattr(self.camera.Gain, "Value"):
             self.camera.Gain.Value = 0
         if hasattr(self.camera.ExposureTime, "SetValue"):
-            self.camera.ExposureTime.SetValue(10000)#(160000)
+            self.camera.ExposureTime.SetValue(17000)#(160000)
 
         self.camera.StartGrabbing(pylon.GrabStrategy_LatestImages)
 
@@ -229,14 +229,14 @@ class CameraAppChild(CameraApp):
                 )
 
                 if grab_result is not None:
-
+                    #self.toggle_event = not self.toggle_event
                     if grab_result.GrabSucceeded():
                         img = self.convert_image_coloring_scheme(grab_result.Array)
                         self.current_snapshot = img
                         self.produce_image_with_modifiers(img)
 
                         # ONE snapshot per event
-                        if self.snapshot_event and self.snapshot_event.is_set():
+                        if self.snapshot_event and self.snapshot_event.is_set():# and self.toggle_event:
                             self.save_snapshot(img)
                             self.snapshot_event.clear()
                             self.status.config(text=self.status_text())

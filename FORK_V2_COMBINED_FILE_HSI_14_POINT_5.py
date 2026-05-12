@@ -96,6 +96,7 @@ print("Loaded PySimpleGUI from:", getattr(sg, "__file__", "<no __file__>"))
 import pathlib
 #import PySimpleGUI as sg
 
+
 # -----Debugging class-------- #
 from abc import ABC, abstractmethod
 from typing import Optional
@@ -111,7 +112,7 @@ USE_SECONDARY_CAMERA = True
 ##MAKE_GUI CLASS##
 DEFAULT_FOLDER = Path(r"E:\Users\Ben\Programs\HSI Programs\z\Data") #string arg not os.path arg --> changed to Path obj not for flexibility
 #DEFAULT_FOLDER = pathlib.Path(r"E:\Users\Ben\Programs\HSI Programs\z\Data\working_camera_2")
-SAVE_DIR_CONST = r"E:\Users\Ben\Programs\HSI Programs\z\Data\working_camera_8_with_wells_option"
+SAVE_DIR_CONST = r"E:\Users\Ben\Programs\HSI Programs\z\Data"
 # ------------------------- #
 
 
@@ -899,12 +900,13 @@ class HSI_Scanner:
                                              pixel_format = "RGB8", save_dir_override = Make_GUI.cur_dir)
                 
         
+           
             #except:
                 #self._set_camera_pixel_format(cur = self.camera, "Mono12")
 
             except LookupError as e: 
                 f'Could not use genicam funcs to modify data memory type camera will use at approximately line #{(DebugProgram.get_line_number())}'
-       
+            print(f'!!!!!!!!!!!!!{Make_GUI.cur_dir}')
 
     # ------------------------- #
     # Secondary camera helpers
@@ -1650,13 +1652,7 @@ class HSI_Scanner:
         one full scan per home point.
         - If custom_home_spot=False, we treat (0,0,0) as the only home and scan once.
         """
-        if z_stack_coords is not None:
-        #Generate z_stack coordinates
-            self.initialize_z_stack_settings()
-            print("z_stack_coords:", z_stack_coords)
-            print("min/max:", min(z_stack_coords), max(z_stack_coords))
-
-        variance = 0.0
+     
         '''
         for z_coord in z_stack_coords:
             z_coord = z_coord * 10000
@@ -1729,28 +1725,40 @@ class HSI_Scanner:
            #     z_stack_logic =  lambda _: [c for c in (z_stack_coords)]
             #else:
             #    z_stack_logic = lambda _: None
-            use_z_stack: bool = (z_stack_coords != None)
-            z_values = z_stack_coords if use_z_stack else [0]
-            assert z_values is not None
             
-    
-            print(f'our z values in mm are: {[z for z in z_values]}')
-            z_values = [HSI_Scanner.Utils.metric_to_asi(z) for z in z_values]
             
-            print(f'our z values in 1/10th micron are: {z_values}')
-            last_z_val = z_values[len(z_values)-1]
+            if z_stack_coords is not None and len(z_stack_coords) > 0:
+                # Generate z_stack coordinates
+                self.initialize_z_stack_settings()
+                print("z_stack_coords:", z_stack_coords)
+                print("min/max:", min(z_stack_coords), max(z_stack_coords))
+                variance = 0.0
+
+                z_values = [HSI_Scanner.Utils.metric_to_asi(z) for z in z_stack_coords]
+
+                print(f'our z values in 1/10th micron are: {z_values}')
+                last_z_val = z_values[-1]
+
+                z_stack_logic = lambda fn: [fn(c) for c in z_values]
+
+            else:
+                z_values = []
+                last_z_val = None
+
+                z_stack_logic = lambda fn: [fn(None)]
 
             '''from typing import Callable, Any
 
-                def z_stack_logic(fn: Callable[[float], Any]) -> list[Any]:
-                    result = []
-                    for c in z_values:
-                        result.append(fn(c))
-                    return result
+            def z_stack_logic(fn: Callable[[float], Any]) -> list[Any]:
+                result = []
+                for c in z_values:
+                    result.append(fn(c))
+                return result
             '''
-            z_stack_logic: Callable[[Callable[[float], [Any]]], None]
+
+            z_stack_logic: Callable[[Callable[[float], Any]], list[Any]]
             z_stack_logic = lambda fn: [fn(c) for c in z_values]
-            
+                
             # Anchor x0_asi, y0_asi at the *current* home
             time.sleep(1)
             x0_asi = self.Stage.get_position_trycasters('X')
@@ -1765,7 +1773,7 @@ class HSI_Scanner:
                 raise RuntimeError(f"Stage home position read failed: x0_asi={x0_asi}, y0_asi={y0_asi}")
 
             if TIME_TO_MANUALLY_FOCUS == True:
-                time.sleep(10)
+                time.sleep(5)
             print("time given to manually focus")
 
            
@@ -1778,16 +1786,26 @@ class HSI_Scanner:
             y_step: float = HSI_Scanner.Utils.metric_to_asi(single_mm=y_distance_mm)
 
             # also use the current X as the subscan anchor
-
+                    # bind _snapshot_event.set if available
+            try:
+                getattr(self, "_snapshot_event")  # just check existence
+                _check_snapshot = self._snapshot_event.set
+            except AttributeError:
+                DebugExceptions.MyAttributeError.custom_warning("_snapshot_event", o=self)
+                _check_snapshot = lambda: None  # no-op if missing
             # Loop over rows (a); logic for the scan pattern not the actual recording of data itself
             #try:
             for a in range(rows):
                 # Move Y to correct position for this row in real space (a → y)
+                
                 y_start = (a * y_step) + y0_asi
                 self.Stage.set_max_speed('Y', 2) #set a second time for both modularity and seems to be issues if program is running for >24 hours - 36 hours with set speed?
                 self.Stage.move_stage(y=y_start)
                 self.Stage.wait_for_device()
-                time.sleep(1)
+                time.sleep(2)
+                time.sleep(0.030)
+                _check_snapshot() #TAKE SNAPSHOT AFTER EVERY Y MOVEMENT INCLUDING 0TH
+                time.sleep(0.030)
                 #y_real_pos = self.Stage.get_position('Y')
                 #print(f"Moved to Y row {a} at {y_real_pos / 10000:.4f} mm") <-- can cause crashes so will remove
 
@@ -1795,9 +1813,11 @@ class HSI_Scanner:
                 is_even = a % 2 == 0
                 direction = +1 if is_even else -1
 
+
                 # choose row start based on snake direction (anchor to subscan home)
                 if is_even:
                     x_start = x0_asi
+        
                 else:
                     x_start = x0_asi + (cols) * x_step
                 
@@ -1808,11 +1828,11 @@ class HSI_Scanner:
                 self.Stage.move_stage(x=x_start)
                 self.Stage.wait_for_device()
                 print("CHECKING IF THE CHANGE IN X SUPERGRID GOES AT PROPER SPEED")
-                
 
             #This should be logic for within subgrid; delta x movement 
                 for b in range(cols):
                     #try:
+
                         delta = direction * x_step
                         try:
                             # Attempt 1: real ASI-2000 position
@@ -1830,7 +1850,8 @@ class HSI_Scanner:
                                 raise RuntimeError(
                                     "Neither ASI-2000 position query nor calculated fallback succeeded"
                                 ) from calc_err
-
+                                
+                        
                         z_stack_logic(lambda c: self.scan_tile(
                                 a, b, bin_factors, save_folder,
                                 delta_x=delta,
@@ -1839,13 +1860,15 @@ class HSI_Scanner:
                                 actual_super_grid_home=(x_real, y_real),
                                 z_plane_to_scan = c,
                                 x_stage_speed = x_stage_speed,
-                                last_z_plane = last_z_val
+                                last_z_plane = last_z_val,
+                                _check_snapshot = _check_snapshot
                                 
                             ))
                                                     #return the stage to previous position unless it's the last Z plane of a z-stack
                                                     #in which case go to the next x-y position... This is slightly more time inefficient
                                                     #than doing an an entire xy plane scan then repeating for different heights
                                                     #but maybe will make folder process easier 
+                        
                         #print(c)
                             #print(f"Starting tile (a={a}, b={b}) at (x={x_real:.4f}, y={y_real:.4f}) mm")
 
@@ -1911,8 +1934,9 @@ class HSI_Scanner:
         self.turn_off_light()
         print("Scan complete. Light turned off.")
 
-    def scan_tile(self, row, col, bin_factors, save_folder,  z_plane_to_scan: float, last_z_plane: float, delta_x: float, x_stage_speed: float,
-                  custom_file_name: str = "", expected_super_grid_home: tuple = (), actual_super_grid_home: tuple = (), ) -> None:
+    def scan_tile(self, row, col, bin_factors, save_folder,  z_plane_to_scan, last_z_plane: float, delta_x: float, x_stage_speed: float,
+                  custom_file_name: str = "", expected_super_grid_home: tuple = (), actual_super_grid_home: tuple = (),
+                  _check_snapshot = lambda: None ) -> None:
 
         """Scan a single tile at (row, col), grab frames, build cube, and save.
 
@@ -1925,11 +1949,12 @@ class HSI_Scanner:
         As of V8 automatically defaults to true if you want to scan a dish/well item in <Make_GUI()>. Was made like this that way there is exactly
         only 1 save folder and expected per <Scanner> instaniation. Harder for user to mess up previous files considering we also don't overwrite old files by default.
         """
-        print(f'Our plane to scan is {z_plane_to_scan}')
-        self.Stage.move_stage(z = z_plane_to_scan)
-        self.Stage.wait_for_device(axis = "Z")
-        cur_z_pos = self.Stage.get_position(axis = "Z")
-        cur_z_pos = HSI_Scanner.Utils.metric_to_asi(single_mm= cur_z_pos, asi_to_mm= True)
+        if z_plane_to_scan:
+            print(f'Our plane to scan is {z_plane_to_scan}')
+            self.Stage.move_stage(z = z_plane_to_scan)
+            self.Stage.wait_for_device(axis = "Z")
+            cur_z_pos = self.Stage.get_position(axis = "Z")
+            cur_z_pos = HSI_Scanner.Utils.metric_to_asi(single_mm= cur_z_pos, asi_to_mm= True)
         #HSI_Scanner.Utils.metric_to_asi_iters([cur_z_pos, z_plane_to_scan])
         
         frame_debug_type = "500"          # Placeholder variable for GUI-User or Private Logic logic
@@ -1991,25 +2016,18 @@ class HSI_Scanner:
         process_frame = self.process_frame
         frame_fn      = frame_debug_fn
 
-        # bind _snapshot_event.set if available
-        try:
-            getattr(self, "_snapshot_event")  # just check existence
-            _check_snapshot = self._snapshot_event.set
-        except AttributeError:
-            DebugExceptions.MyAttributeError.custom_warning("_snapshot_event", o=self)
-            _check_snapshot = lambda: None  # no-op if missing
 
-        if TIME_TO_MANUALLY_FOCUS:
-            time.sleep(5)
-        # call safely
-        _check_snapshot()
-        
+
+        #if TIME_TO_MANUALLY_FOCUS:
+        #    time.sleep(5)
+                
         i = 0
         print(f"MOVING STAGE NOW (row={row}, col={col})")
 
         # Throttle status polls a bit (serial is slow). Tune 2..8; 4 is a safe start. Found worse results polling every second frame
         poll_div = 2
         
+
         self.Stage.move_stage(x=delta_x, relative=True)
 
     # --- Start grabbing with chosen strategy (unchanged) ---
@@ -2041,10 +2059,14 @@ class HSI_Scanner:
             print("Closing window")
             self.camera.StopGrabbing()
             cv2.destroyAllWindows()
+            self.Stage.wait_for_device()
+
             
         timed_event = custom_timer.stop() #<-- for checking x_distance travel time should be around 8.2 seconds on 1/0.0625 mm/s * 0.51 mm distance
-        _check_snapshot()
 
+        time.sleep(0.040)
+        _check_snapshot()
+        time.sleep(0.030)
         if not isinstance(cube_frames, list):
             print("Cube_frames is either not a list or is uninitialized")
         
@@ -2118,8 +2140,8 @@ class HSI_Scanner:
         print(f"[DEBUG] Calculated wavelengths shape: {wavelengths.shape if hasattr(wavelengths, 'shape') else type(wavelengths)}")
         print(f'wavelengths nm = {wavelengths}')
         
-                
-            # --- Naming the file --- #
+                        
+        # --- Naming the file --- #
         meta_file_type = '.json'
         data_file_type = '.npy'
 
@@ -2129,10 +2151,6 @@ class HSI_Scanner:
         del meta_file_type, data_file_type
 
         # --- Priority naming ---
-        # 1. user custom name
-        # 2. default: <actual_coords>_<expected_coords>_<subgrid>
-        #    (ignore z coordinate for now to avoid filename spam)
-
         if isinstance(custom_file_name, str) and custom_file_name.strip():
             meta_file_name = f"{custom_file_name}_{meta_file_name}"
             data_file_name = f"{custom_file_name}_{data_file_name}"
@@ -2140,28 +2158,20 @@ class HSI_Scanner:
         else:
             sub_grid_cur = f"cur_z_pos_{cur_z_pos}_expected_z_position_{z_plane_to_scan/10}_um_sub_grid_row_{row}_col_{col}"
 
-            # --- Actual super grid coords (x, y only) ---
             super_x = actual_super_grid_home[0]
             super_y = actual_super_grid_home[1]
 
-            # --- Expected super grid coords ---
             print(f'Expected super_grid_coords are: {expected_super_grid_home}')
             expected_super_grid_coords_str = "none"
+
             if expected_super_grid_home is not None and any(expected_super_grid_home):
                 try:
-                    '''
-                    expected_super_grid_coords = HSI_Scanner.Utils.metric_to_asi(
-                        mm_iter=expected_super_grid_home,
-                        asi_to_mm=False
-                    )
-                    '''
                     expected_super_grid_coords_str = "_".join(
-                        f"{v:.3f}" for v in expected_super_grid_coords_str[:2]
+                        f"{v:.3f}" for v in expected_super_grid_home[:2]
                     )
                 except Exception as e:
                     print(f"[WARN] Failed to convert expected_super_grid_coords: {e}")
 
-            # --- Build filename stem ---
             super_grid_total = (
                 f"actual_coords_x{super_x}_y{super_y}_"
                 f"expected_{expected_super_grid_coords_str}"
@@ -2175,59 +2185,80 @@ class HSI_Scanner:
         # --- Final filenames ---
         meta_filename = meta_file_name
         data_filename = data_file_name
-
-        # Debug prints
         print(f"[DEBUG] Default data file name for saving: {data_filename}")
         print(f"[DEBUG] Default meta file name for saving: {meta_filename}")
 
+        # --- Resolve base directory (GUI fallback → global fallback later) ---
+        save_dir = Make_GUI.cur_dir if getattr(Make_GUI, "cur_dir", "") else DEFAULT_FOLDER
 
-        # Set the GUI meta file
-        Make_GUI.set_meta_file(
-            directory=Make_GUI.cur_dir if Make_GUI.cur_dir else SAVE_DIR_CONST,
+        # --- Resolve save paths (DO ALL CHECKS HERE, ONCE) ---
+        save_paths = [data_filename, meta_filename]
+
+        for i, save_path in enumerate(save_paths):
+            # attach directory FIRST
+            save_path = os.path.normpath(os.path.join(save_dir, save_path))
+
+            # collision check immediately
+            if os.path.exists(save_path):
+                base, ext = os.path.splitext(save_path)
+                save_path = base + "_copy" + ext
+                print(f"[DEBUG] Save path exists, changed to: {save_path}")
+
+            print(f"[DEBUG] Normalized save path: {save_path}")
+            save_paths[i] = save_path
+
+        data_local_path, meta_local_path = save_paths
+
+        band_wavelength = True
+        wavelength_range_nm = (
+            list(zip(spectral_axis.tolist(), wavelengths.tolist()))
+            if band_wavelength else wavelengths.tolist()
+        )
+
+        Make_GUI.name_meta_file(
+            meta_local_path,
+            directory=save_dir,
             filename=meta_filename
         )
 
         print(f"[DEBUG] Set meta file to: {Make_GUI.meta_file}")
+        print(f'Make_GUI.cur_dir = {Make_GUI.cur_dir}')
 
-        band_wavelength = True
-        wavelength_range_nm  = list(zip(spectral_axis.tolist(), wavelengths.tolist())) if band_wavelength else wavelengths.tolist()
-        
-        #print(np.dtype(binned_cube))
-        #metafile_printout = list(zip(spectral_axis.tolist(), wavelengths.tolist())) if band_wavelength else wavelengths.tolist()
-        Make_GUI._write_to_data_metafile(f'data dims: {binned_cube.shape}', f'data dims format: (spectral, spatial, line)', #need to probably create custom type here to not hardcode the solution
-                                         #f'cube dims data type: {[data.dtype for data in cube.shape]}',
-                                         f'binned_cube obj type: {type(binned_cube)}', f'binned_cube dims container type(s): {[binned_cube.dtype]}',
-                                         f'gain factor: {self.gain}', f'exposure ms: {self.exposure}', 
-                                         f'data type of intensity values in dims container: {self.memory_type}', 
-                                         '', 
-                                         f'delta_x mm: {HSI_Scanner.Utils.metric_to_asi(delta_x, asi_to_mm= True)}', 
-                                         f'actual_super_grid_home: {actual_super_grid_home}',f'row: {row}', f'col: {col}', 
-                                         f'relative z_plane_to_scan μm: {z_plane_to_scan / 10}', f'distance between z-planes in mm: {(Make_GUI.distance_between_z_stack)}' , 
-                                         f'number_of_z_stacks: {Make_GUI.number_of_z_stacks}', 
-                                         '', 
-                                         f'led_power: {self.led_power}', f'bin_factors (spec,spat,line): {bin_factors}', f'band/nm: {wavelength_range_nm}')
+        Make_GUI._write_to_data_metafile(
+            f'data dims: {binned_cube.shape}',
+            f'data dims format: (spectral, spatial, line)',
+            f'binned_cube obj type: {type(binned_cube)}',
+            f'binned_cube dims container type(s): {[binned_cube.dtype]}',
+            f'gain factor: {self.gain}',
+            f'exposure ms: {self.exposure}',
+            f'data type of intensity values in dims container: {self.memory_type}',
+            '',
+            f'delta_x mm: {HSI_Scanner.Utils.metric_to_asi(delta_x, asi_to_mm=True)}',
+            f'actual_super_grid_home: {actual_super_grid_home}',
+            f'row: {row}',
+            f'col: {col}',
+            f'relative z_plane_to_scan μm: {z_plane_to_scan / 10}',
+            f'distance between z-planes in mm: {Make_GUI.distance_between_z_stack}',
+            f'number_of_z_stacks: {Make_GUI.number_of_z_stacks}',
+            '',
+            f'led_power: {self.led_power}',
+            f'bin_factors (spec,spat,line): {bin_factors}',
+            f'band/nm: {wavelength_range_nm}',
+            optional_path=meta_local_path,
+        )
 
-        save_path = os.path.join(save_folder, data_filename)
-        save_path = os.path.normpath(save_path)
-        print(f"[DEBUG] Normalized save path: {save_path}")
-
-        if os.path.exists(save_path):
-            base, ext = os.path.splitext(save_path)
-            save_path = base + "_copy" + ext
-            print(f"[DEBUG] Save path exists, changed to: {save_path}")
-
-        np.save(save_path, binned_cube)
-        print(f"[INFO] Saved cube to: {save_path}")
+        np.save(data_local_path, binned_cube)
+        print(f"[INFO] Saved cube to: {data_local_path}")
 
         del binned_cube, cube, cube_frames, flat_values, spectral_axis, wavelengths
         gc.collect()
-        
+
         if z_plane_to_scan is not last_z_plane:
-             self.Stage.set_max_speed('X', 1.5)
-             self.Stage.move_stage(x= -1 * delta_x, relative=True)
-             self.Stage.wait_for_device(axis = "X")
-             self.Stage.set_max_speed('X', x_stage_speed)
-             
+            self.Stage.set_max_speed('X', 1.5)
+            self.Stage.move_stage(x=-1 * delta_x, relative=True)
+            self.Stage.wait_for_device(axis="X")
+            self.Stage.set_max_speed('X', x_stage_speed)
+                    
         
     #``````#######SETTING ROI#########```````#
             ############## '''
@@ -2881,11 +2912,12 @@ class Make_GUI:
     cur_dir: str = ""   #class level variable that saves based on instance variable found init --> should be update to date at this point hence cur_dir
     distance_between_z_stack: float | None = None
     number_of_z_stacks: int | None = None
-     
+    
     def __init__(self):
         # preload the save/GUI structure before the actual scan execution
-        cur_file, save_dir = self._format_meta_data_and_save_structure()
+        cur_file_dir, save_dir = self._format_meta_data_and_save_structure()
         Make_GUI.cur_dir = save_dir or ""   # keep a canonical, class-level current dir
+        Make_GUI.meta_file = str(cur_file_dir) or ""
         print(f"our Make_GUI.cur_dir var is {Make_GUI.cur_dir}")
         self.params: Dict[str, Any] = {}
                 # Leave empty and it’ll be used only as a last resort.
@@ -2898,14 +2930,18 @@ class Make_GUI:
     # ── public-ish helpers ──────────────────────────────────────────────
 
     @classmethod
-    def set_meta_file(cls, *, directory: Union[str, Path], filename: Union[str, Path]) -> None:
+    def name_meta_file(cls, *args, directory: Union[str, Path], filename: Union[str, Path]) -> str | os.PathLike:
         """
-        Set the class-level "data meta" file path used by _write_to_data_metafile().
+        Set the class-level "data meta" file path used by <_write_to_data_metafile()>.
         Accepts Path or str for both args. Spaces are fine.
         """
-        d = Path(directory)
-        f = Path(filename)
-        cls.meta_file = str(d / f)
+        if args:
+            return args[0] 
+        else:
+            d = Path(directory)
+            f = Path(filename)
+            cls.meta_file = str(d / f)
+            return cls.meta_file
 
     def _write_to_metafile(self, **kwargs) -> None:
         """
@@ -2921,29 +2957,31 @@ class Make_GUI:
             f.write("\n")
 
     @classmethod
-    def _write_to_data_metafile(cls, *args) -> None:
+    def _write_to_data_metafile(cls, *args, optional_path: str) -> None:
         """
         Append a JSON object (pretty-printed) to the class-level data meta file.
         Call set_meta_file(...) first.
         """
-        if not cls.meta_file:
+        loc = str(optional_path if optional_path else cls.meta_file)
+
+        if not loc:
             raise ValueError("Meta file path not set. Call set_meta_file() first.")
-        with open(cls.meta_file, "a", encoding="utf-8") as f:
+
+        with open(loc, "a", encoding="utf-8") as f:
             json.dump(args, f, ensure_ascii=False, indent=2)
             f.write("\n")
 
-    # ── core setup ──────────────────────────────────────────────────────
-
     def _format_meta_data_and_save_structure(self):
         """
-        Decide where the GUI's meta JSON lives (under DEFAULT_FOLDER, named after this .py),
+        Decide where the GUI's meta JSON lives (under DEFAULT_FOLDER by default with nmame pattern <__file__>.json),
         ensure the folder exists, read previous settings (if any), then write a normalized
         JSON file containing at least {"previous_user_folder": "..."}.
         """
         print("[INIT] Starting _format_meta_data_and_save_structure")
 
         self.default_folder: Path = DEFAULT_FOLDER
-        self.previous_user_folder: Optional[str] = None  # marker
+        self.previous_user_folder: Optional[str] | None = None  # marker
+        self.meta_file_path: Path | None = None
 
         # derive meta file name from current script name
         cur_file_name = __file__
@@ -2964,18 +3002,27 @@ class Make_GUI:
         print(f"[FORMAT] txt_meta_file path: {txt_meta_file}")
 
         # Read any existing state (legacy TXT or JSON) to populate self.previous_user_folder
-        self._change_meta_data_and_save_structure(params=None, user_txt_meta_file=txt_meta_file)
-
+        new_folder = self._change_meta_data_and_save_structure(params=None, user_txt_meta_file=txt_meta_file)
+        print(f'new folder is: {new_folder}')
         # Normalize payload and (over)write as JSON
-        payload = {"previous_user_folder": self.previous_user_folder or str(self.default_folder)}
+        payload = {
+            "previous_user_folder": (
+                new_folder
+                or self.previous_user_folder
+                or str(self.default_folder)
+            )
+        }
+
         with open(txt_meta_file, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
             f.write("\n")
-        print(f"[FORMAT] Wrote GUI meta JSON: {payload!r}")
 
-        self.meta_file_path: Path = txt_meta_file
+        self.meta_file_path = txt_meta_file
+        self.previous_user_folder = payload["previous_user_folder"]
+
         assert self.meta_file_path, "meta_file_path must not be empty"
-        print("[INIT] Finished _format_meta_data_and_save_structure")
+        assert self.previous_user_folder, "previous_user_folder must not be empty"
+
         return self.meta_file_path, self.previous_user_folder
 
     def _change_meta_data_and_save_structure(
@@ -2998,6 +3045,8 @@ class Make_GUI:
         if params is not None:
             # SAVE branch
             save_folder = params.get("save_folder") if isinstance(params, dict) else None
+            print(f'save folder is {save_folder}')
+            
             if save_folder:
                 self.previous_user_folder = os.path.abspath(str(save_folder))
             else:
@@ -3008,7 +3057,9 @@ class Make_GUI:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
                 f.write("\n")
             print(f"[CHANGE] Saved JSON meta: {payload!r}")
-            return
+            
+            Make_GUI.cur_dir = self.previous_user_folder
+            return self.previous_user_folder
 
         # READ branch
         if not meta_path.exists():
@@ -3018,12 +3069,14 @@ class Make_GUI:
 
         # Try JSON first, then legacy text as fallback
         payload = self._json_load_or_none(meta_path)
+        print(f'payload is {payload} on line {DebugProgram.get_line_number()}')
+
         if isinstance(payload, dict) and "previous_user_folder" in payload:
             user_dir = str(payload.get("previous_user_folder") or "").strip()
             if user_dir:
-                self.previous_user_folder = os.path.abspath(user_dir)
-                print(f"[CHANGE] Loaded JSON meta previous_user_folder={self.previous_user_folder}")
-                return
+                new_folder = os.path.abspath(user_dir)
+                print(f"[CHANGE] Loaded JSON meta file var <new_folder>={new_folder}; mutation possible")
+                return new_folder
 
         # Fallback: legacy first-line text
         try:

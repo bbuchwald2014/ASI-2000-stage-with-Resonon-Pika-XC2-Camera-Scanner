@@ -13,12 +13,17 @@ from typing import TypeAlias, Final
 
 CUBE_ROOT_DIR = r'F:\Autofocus_data_set\Mock_initial_z_stack_set\Hyper001_Chicago_Cancer_BOT_SITE_HPV_NEG\Brightfield\Stained'
 CUBE_ROOT_DIR = r'F:\Autofocus_data_set\Mock_initial_z_stack_set\Hyper001_Chicago_Cancer_BOT_SITE_HPV_NEG\Brightfield\Unstained'
+CUBE_ROOT_DIR = r'Z:\Data\MCF_7_Breast_Cancer\Real\With_no_RGB_camera'
+CUBE_ROOT_DIR = r'E:/MCF_7_Breast_Cancer/Real/With_RGB_camera/grr'
+CUBE_ROOT_DIR = r'E:\MCF_7_Breast_Cancer\Real\With_RGB_camera\pt_2'
+CUBE_ROOT_DIR = r'E:\MCF_7_Breast_Cancer\Real\With_RGB_camera\pt_2'
+#CUBE_ROOT_DIR = r'E:\Lennon_Camera_Project\re\test_homography\re_0.78mm_stage'
 FILE_PATTERN = "*.npy"
 
 contrast_type_per_cube: TypeAlias = bool
 t, f = True, False
 
-USER_CONTRAST_CHOICE = f
+USER_CONTRAST_CHOICE = t
 del t, f
 
 

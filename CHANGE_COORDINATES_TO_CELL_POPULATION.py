@@ -9,6 +9,7 @@ from typing import Literal, TypeAlias, Any, TypedDict, Tuple, TypeVar
 from collections.abc import Iterable
 import tkinter as tk
 import gc
+import warnings
 
 globbed_objs: TypeAlias = os.PathLike | str
 tup_of_tup: TypeAlias = tuple[tuple[Any, ...], ...]
@@ -30,7 +31,7 @@ MODIFY_MEMORY_SIZE= True
 DELETE_FILES = True
 
 class  Hold_Meta_Data():
-    FOLDER = r'C:\MCF_7_Breast_Cancer\Real\With_RGB_camera\pt_2'
+    FOLDER: str = r'C:\MCF_7_Breast_Cancer\Real\With_RGB_camera\pt_2'
                                         #dict[str, (x_coord, y_coord)]
 
     ACTUAL_COORDINATES_BASE =(
@@ -55,7 +56,7 @@ class Post_Data_Process():
         self.actual_cords = actual_coordinates
         self.folder = folder_name
         
-        self.extensions = "*.npy", "*.json"
+        self.extensions = "*.npy", "*.json" ,  "_data.npy", "_meta.json"
 
         self.globbed_files =  None
         self.gcd = None
@@ -106,8 +107,12 @@ class Post_Data_Process():
         files_opened = []
         file_dims = []
         memory_all_files = {"files_opened:": files_opened, "file_dims:" : file_dims, "temp": None}
-
-        self.__save_user_input: bool = False
+        #self.__save_user_input: bool = False
+        
+        to_delete_wrapper = lambda _, override_delete: self._delete_files(
+                            main_file_to_delete=_,
+                            live_file_delete= override_delete if override_delete is not None else commands.get("should_delete", lambda: True)()
+                        )
         
         for npy_file in [npy_ext for npy_ext in self.globbed_files if npy_ext.endswith('.npy')]:
             try:
@@ -120,17 +125,21 @@ class Post_Data_Process():
             except Exception:
                 files_not_opened.append(npy_file)
                 print(f'Could not get memory of file: \t {npy_file}')
-                continue
+                try:
+                    to_delete_wrapper(npy_file, override_delete= True)
+                except:
+                    RuntimeWarning(f"Couldn't delete file {npy_file}")
+                
                     
         line_dims = np.array([d[2] for d in file_dims if len(d) >= 3], dtype=np.float64)
-        print(f'line dims is: {line_dims}')
+        print(f'line dims is: {line_dims} with len: {len(line_dims)}')
 
         temp = np.percentile(a=line_dims, q=(25, 75), method="closest_observation")
         lower_quartile, upper_quartile = temp[0], temp[1]
         
         IQR = (upper_quartile - lower_quartile) * outlierConstant
         quartileSet = (lower_quartile - IQR, upper_quartile + IQR)
-        
+        print(f'IQR is ({lower_quartile - IQR, upper_quartile + IQR})')
         ui_state = None
         files_truthy = None
         save_user_input_truthy = True
@@ -171,44 +180,58 @@ class Post_Data_Process():
         print(f'target_line_dim to round to is {target_line_dim}')
         meta_log = []
 
-        to_delete_Lambda = lambda _: self._delete_files(
-                            main_file_to_delete=npy_file,
-                            live_file_delete=commands.get("should_delete", lambda: True)()
-                        )
+        target_line_dim = int(min(valid_lines))
+        print(f'target_line_dim to round to is {target_line_dim}')
+        meta_log = []
+
         for i, npy_file in enumerate(files_opened):
             try:
-                #np.save(npy_file, np.array(arr)) <-- doesnt open properly throwing windows 8 error 
+                # --- Phase 1: Read header only ---
                 with open(npy_file, "rb") as f:
                     version = np.lib.format.read_magic(f)
                     shape, _, _ = np.lib.format._read_array_header(f, version)
-          
-                    if shape[2] <= quartileSet[0] and save_user_input_truthy:
-                        print("DELETING at {i} , {npy_file}")
-                        __update_tk(file=npy_file, **ui_state)
-                        deleted = to_delete_Lambda(None)
+
+                #print(f'{shape} is shape')
+
+                # --- Phase 2: Branch on shape ---
+                if shape[2] < quartileSet[0] and save_user_input_truthy:
+                    print(f"DELETING at {i}, {npy_file}")
+                    __update_tk(file=npy_file, **ui_state)
+                    deleted = to_delete_wrapper(None, override_delete=False)
+                    meta_log.append({
+                        "files": deleted["files_to_delete"],
+                        "action": "deleted" if delete_outlier_files_and_modify_others else "flagged_for_deletion",
+                        "line_dim": int(shape[2])
+                    })
+
+                elif shape[2] != target_line_dim:
+                    #print("MODIFY LOOP")
+
+                    # Read fully (file is closed from phase 1)
+                    arr = np.load(npy_file)
+                    arr = arr[:, :, :target_line_dim]
+
+                    print(f'arr.shape is {arr.shape}')
+                    print(f'ENTERED: new arr will be {arr.shape}')
+
+                    if delete_outlier_files_and_modify_others:
+                        # Write to temp file first, then replace — avoids partial writes
+                        tmp_path = npy_file + ".tmp"
+                        with open(tmp_path, "wb") as fw:
+                            np.save(fw, arr)
+                        os.replace(tmp_path, npy_file)  # atomic on most OSes
+
                         meta_log.append({
-                            "files": deleted["files_to_delete"],
-                            "action": "deleted" if delete_outlier_files_and_modify_others else "flagged_for_deletion",
-                            "line_dim": int(shape[2])
+                            "file": npy_file,
+                            "action": "trimmed",
+                            "new_dim": target_line_dim
                         })
-                    elif len(shape) >= 3 and shape[2] > target_line_dim:
-                        f.seek(0)
-                        arr = np.load(f)  # FIX: no context manager
-                        arr = arr[:, :, :target_line_dim]
-                        print(f'ENTERED: new arr will be {arr.shape}')
-                        if delete_outlier_files_and_modify_others:
-                            with open(npy_file, "wb") as fw:
-                                np.save(fw, np.array(arr))
-                            meta_log.append({
-                                "file": npy_file,
-                                "action": "trimmed",
-                                "new_dim": target_line_dim
-                            })
-                        del arr
+
+                    del arr
+
             except Exception as e:
-                print(f"FAILED FILE {npy_file}: {e}")  # IMPORTANT: stop silent failure
-                files_not_opened.append(npy_file)
-                to_delete_Lambda(None)
+                print(f"FAILED FILE {npy_file}: {e}")
+                to_delete_wrapper(npy_file, override_delete=True)
 
             gc.collect()
             
@@ -232,7 +255,6 @@ class Post_Data_Process():
         self.tk_root.after(1000, callback)
         print(f'Finished modifiying files returning <memory_all_files> with type: {type(memory_all_files)}')
         return memory_all_files
-
 
     def _instaniate_tk_window(self) -> tuple[bool, bool, dict[str, tk.Widget]]:
         radio_like = tk.Toplevel(self.tk_root)
@@ -276,34 +298,60 @@ class Post_Data_Process():
         }
         
     def _delete_files(self, main_file_to_delete: os.PathLike | str,
-                        default_file_types_to_check: tuple[str, ...] = (".npy", ".json"),
-                        save_user_input = False,
-                        live_file_delete: bool = False) -> dict:
+                        default_file_types_to_check: tuple[str, ...] = ("_data.npy", "_meta.json"),
+                        live_file_delete: bool = False,
+                        debug: bool = False) -> dict[str, list[str | os.PathLike,]]:
             
         '''Pass in a .npy file or .json expected but allows others if it self.extensions; assumes not mutation'''
         
         default = default_file_types_to_check
 
+        extension_warning = lambda ext: warnings.warn(
+            f"<ext>: {ext} not in extensions; <self.extensions> = {self.extensions}; possible attribute mutation or bad string parse",
+            category=RuntimeWarning,
+            stacklevel=2,
+        )
+
+        b: str = str(main_file_to_delete)
+
         # use regex to grab extension at end (literal dot + non-dots until end)
-        ending_match = re.search(pattern=r'\.[^.]+$', string=str(main_file_to_delete))
+        ending_match = re.search(pattern=r"(?:_data|_meta)\.[^.]+$", string=b)
         ending = ending_match.group(0) if ending_match else ""
+        print(f"Ending is : {ending}")
 
-        files_to_delete = [
-            str(main_file_to_delete).replace(ending, ext)
-            if ext in self.extensions else None
+        if not ending:
+            extension_warning(b)
+            return {"files_to_delete": []}
+
+        if debug:
+            a = b.replace(ending, default[1])
+
+            print("path:", a)
+            print("exists:", os.path.exists(a))
+            print("isfile:", os.path.isfile(a))
+            print("isdir:", os.path.isdir(a))
+            print("parent exists:", os.path.exists(os.path.dirname(a)))
+
+        file_exts_to_delete = [
+            b.replace(ending, ext)
             for ext in default
-        ] 
-        # make sure delete is subset/ are elements of self.extension no mutations
+        ]
 
-        if (files_to_delete is not None) and (live_file_delete != False):  # use parameter, not global 
+        # make sure delete is subset/ are elements of self.extension no mutations
+        print(f"files_to_delete: {file_exts_to_delete}")
+
+        if file_exts_to_delete and live_file_delete != False:  # use parameter, not global 
             try:
-                for file in files_to_delete:
+                for file in file_exts_to_delete:
+                    print(f"{file} in files to del loop")
                     if file and os.path.exists(file):  # should not crash here as this <_delete_files> func will be called from elsewhere
+                        print(f"{file} in os remove loop")
                         os.remove(file)
+
             except:
                 pass
-            
-        return {"files_to_delete": files_to_delete}
+
+        return {"files_to_delete": file_exts_to_delete}
     
     def _make_populations_name(self,
         all_population_splits: tuple[tuple[float, float], ...],
